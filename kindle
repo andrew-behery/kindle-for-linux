@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Open Kindle in its own window.
+#   kindle           open Kindle (the first open after login starts Android in the background)
+#   kindle --stop    shut Android down and free its memory
+#   kindle --status  show whether Android is running, frozen or stopped
+# Between opens Android stays up but frozen (no CPU use), so the next open is quick.
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+# shellcheck source=lib.sh
+source "$here/lib.sh"
+
+notify() { if command -v notify-send >/dev/null; then notify-send -a Kindle "$@" || true; fi; }
+fail() {
+  notify -u critical Kindle "$*"
+  die "$*"
+}
+
+command -v waydroid >/dev/null || fail "Waydroid isn't installed. Run install.sh again."
+
+open_kindle() {
+  if [[ $(session_state) != RUNNING ]]; then
+    notify Kindle "Starting Android…"
+    start_android 180 || fail "Android didn't start within 3 minutes. Details: $STATE_DIR/session.log"
+  fi
+  hide_waydroid_entry
+  if [[ ! -f $KINDLE_ICON ]] && ! kindle_installed; then
+    # Not installed yet: open its Play Store page instead.
+    waydroid app intent android.intent.action.VIEW "market://details?id=$KINDLE_PKG"
+    return
+  fi
+  waydroid app launch "$KINDLE_PKG"
+}
+
+case ${1:-} in
+  --stop) stop_android ;;
+  --status)
+    printf 'Android session: %s\nContainer:       %s\n' "$(session_state)" "$(container_state)"
+    ;;
+  --x11-inner)
+    # Runs inside cage (see below): Android draws into cage's Wayland display.
+    open_kindle
+    while sleep 3600; do :; done
+    ;;
+  "")
+    case $(display_mode) in
+      wayland) open_kindle ;;
+      x11)
+        command -v cage >/dev/null || fail "cage is needed on X11 desktops. Run install.sh again."
+        # One cage window holds Android. Closing it shuts Android down, since Android can't
+        # outlive the display it draws into.
+        if pgrep -u "$UID" -x cage >/dev/null && [[ $(session_state) == RUNNING ]]; then
+          waydroid app launch "$KINDLE_PKG"
+        else
+          cage -d -- "$here/kindle" --x11-inner || true
+          stop_android
+        fi
+        ;;
+      none) die "Run this from inside your desktop session." ;;
+    esac
+    ;;
+  *) die "unknown option: $1 (try --stop or --status)" ;;
+esac
