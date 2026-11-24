@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Kindle for Linux: sets up the real Kindle Android app in Waydroid, tuned to open fast and stay small.
-# No Google account, no Play Store, nothing to register: the Kindle app is downloaded directly and
-# checked against Amazon's signing certificate before it's installed. Kindle's window is scrcpy,
-# showing a virtual Android screen that resizes with the window.
+# No Google account, no Play Store, nothing to register. The Kindle app is the APK you download
+# (Amazon publishes it only through Google Play), checked against Amazon's signing certificate
+# before it's installed. Kindle's window is scrcpy, showing a virtual Android screen that resizes
+# with the window.
 #
-#   ./install.sh                 run as your normal user, in a terminal inside your desktop session
-#   ./install.sh --apk FILE      install Kindle from an APK you already have (still checked)
+#   ./install.sh                 run as your normal user, in a terminal inside your desktop session;
+#                                finds the Kindle APK in your Downloads folder
+#   ./install.sh --apk FILE      install Kindle from this APK (still checked)
 #   ./install.sh --check         only run the compatibility checks; change nothing
 #
 # It asks for your password once. Safe to rerun: finished steps are skipped.
@@ -41,7 +43,7 @@ SCRCPY_SHA256_x86_64=9f969d30cc574816077edecda65719c1c70b0aee1df1ba5fa00779ac07b
 # The certificate Amazon signs the Kindle app with (SHA-256). Android refuses an APK whose
 # signatures don't verify against the certificate inside it, so matching this proves who made it.
 AMAZON_KINDLE_CERT=2f19adeb284eb36f7f07786152b9a1d14b21653203ad0b04ebbf9c73ab6d7625
-KINDLE_APK_URL="https://d.apkpure.com/b/APK/$KINDLE_PKG?version=latest"
+KINDLE_APK_PAGE=https://www.apkmirror.com/apk/amazon-mobile-llc/amazon-kindle/
 CACHE_DIR=${XDG_CACHE_HOME:-$HOME/.cache}/kindle-for-linux
 
 apk_arg=""
@@ -57,6 +59,35 @@ while (($#)); do
   esac
   shift
 done
+
+# The Kindle APK. Amazon publishes the app only through Google Play; the copies other stores
+# carry (APKPure, Amazon's Appstore) are its Fire tablet build, which ordinary Android refuses to
+# install. So it comes from the user: --apk, or the newest suitable APK in the Downloads folder.
+# apkcert.py --kindle checks Amazon's certificate and that it's the Play build with arm64 code.
+kindle_apk_ok() { python3 "$here/apkcert.py" "$1" --kindle "$AMAZON_KINDLE_CERT" 2>/dev/null; }
+find_kindle_apk() {
+  local dir f
+  dir=$(xdg-user-dir DOWNLOAD 2>/dev/null || true)
+  [[ -d $dir ]] || dir=$HOME/Downloads
+  [[ -d $dir ]] || return 1
+  while IFS= read -r f; do
+    if kindle_apk_ok "$f"; then
+      echo "$f"
+      return 0
+    fi
+  done < <(find "$dir" -maxdepth 2 -type f -iname '*.apk' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n 30 | cut -d' ' -f2-)
+  return 1
+}
+explain_kindle_apk() {
+  cat >&2 <<EOF
+
+    Amazon publishes the Kindle app only through Google Play, so this can't download it for you.
+    1. Open $KINDLE_APK_PAGE
+    2. Pick the newest 8.x version (not 14.x: that's the Fire tablet build), then the
+       variant for "arm64-v8a", and download the APK into your Downloads folder.
+    3. Run ./install.sh again. The APK is checked against Amazon's signing certificate first.
+EOF
+}
 
 mkdir -p "$STATE_DIR"
 LOG=$STATE_DIR/install.log
@@ -133,6 +164,14 @@ note "Desktop: $mode${pm:+, package manager: ${pm%-get}}"
 note "Android will draw with $gpu_note"
 [[ $arch == x86_64 ]] && note "ARM translation: $arm_layer (Kindle is ARM-only)"
 note "Log: $LOG"
+if [[ -n $apk_arg ]]; then
+  note "Kindle APK: $apk_arg"
+elif found=$(find_kindle_apk); then
+  note "Kindle APK: $found"
+else
+  warn "No Kindle APK in your Downloads folder yet. It's needed at the end; get it while this runs:"
+  explain_kindle_apk
+fi
 [[ $mode == x11 ]] && warn "X11 support is experimental (Android runs in a hidden cage compositor). Please report how it goes."
 if ((check_only)); then
   note "(--check: stopping before any change)"
@@ -463,24 +502,30 @@ note "One display, frozen while Kindle is closed, no animations, dark mode, no s
 if [[ $(adb_shell pm path "$KINDLE_PKG" 2>/dev/null) == package:* && -z $apk_arg ]]; then
   note "Kindle is already installed."
 else
-  mkdir -p "$CACHE_DIR"
   apk=$apk_arg
-  if [[ -z $apk ]]; then
-    say "Downloading the Kindle app"
-    apk=$CACHE_DIR/kindle.apk
-    curl -fL --retry 3 --progress-bar -A "Mozilla/5.0 (X11; Linux x86_64)" "$KINDLE_APK_URL" -o "$apk" ||
-      die "Couldn't download Kindle. Try again later, or pass an APK you have with --apk FILE."
-  fi
-  say "Checking it's genuinely Amazon's"
-  if python3 "$here/apkcert.py" "$apk" --expect "$AMAZON_KINDLE_CERT"; then
-    note "Signed with Amazon's Kindle certificate."
+  if [[ -n $apk ]]; then
+    say "Checking $(basename "$apk") is genuinely Amazon's Kindle"
+    rc=0
+    python3 "$here/apkcert.py" "$apk" --kindle "$AMAZON_KINDLE_CERT" || rc=$?
+    case $rc in
+      0) note "Signed with Amazon's Kindle certificate; the Google Play build." ;;
+      3 | 4)
+        explain_kindle_apk
+        die "$(basename "$apk") is the wrong build of Kindle (see above)."
+        ;;
+      *) die "$(basename "$apk") is NOT signed by Amazon's Kindle certificate. Not installing it." ;;
+    esac
+  elif apk=$(find_kindle_apk); then
+    say "Found Kindle in your Downloads: $(basename "$apk")"
+    note "Signed with Amazon's Kindle certificate; the Google Play build."
   else
-    die "$(basename "$apk") is NOT signed by Amazon's Kindle certificate. Not installing it."
+    say "The Kindle app"
+    explain_kindle_apk
+    die "No Kindle APK found yet. Everything else is set up, so the rerun is quick."
   fi
   say "Installing Kindle (Android prepares the app under ARM translation, which takes a minute)"
   # -r keeps an installed Kindle's data (your sign-in and books) when replacing it.
   out=$(timeout 600 env HOME="$ADB_HOME" "$(adb_bin)" -s "$serial" install -r "$apk" 2>&1) || true
-  [[ -n $apk_arg ]] || rm -f "$apk"
   [[ $out == *Success* ]] || die "Kindle didn't install: ${out##*$'\n'}"
   note "Installed."
 fi

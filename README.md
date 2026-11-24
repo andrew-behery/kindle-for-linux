@@ -16,6 +16,13 @@ scaled displays.
 
 ## Install
 
+First, get the Kindle app itself. Amazon publishes it only through Google Play, so download the
+APK from [APKMirror's Kindle page](https://www.apkmirror.com/apk/amazon-mobile-llc/amazon-kindle/):
+the newest **8.x** version, **arm64-v8a** variant, into your Downloads folder. Avoid **14.x**:
+that's Amazon's Fire tablet build (also what APKPure and Amazon's Appstore carry), and ordinary
+Android refuses to install it. Whichever file you pick, the installer checks it's signed with
+Amazon's certificate and is the right build before installing it.
+
 ```sh
 git clone https://github.com/andrew-behery/kindle-for-linux.git
 cd kindle-for-linux
@@ -36,11 +43,13 @@ and it's safe to rerun. **No Google account, no Play Store, no device registrati
    which shows Kindle's window and syncs the clipboard both ways,
 6. tunes Android for reading: no animations, dark mode, no screen sleep, and frozen (no CPU use)
    whenever Kindle's window is closed,
-7. downloads the Kindle app and **checks it's signed with Amazon's Kindle certificate** before
-   installing it (or use `./install.sh --apk kindle.apk` with an APK you already have; same check),
+7. finds the Kindle APK in your Downloads folder (or takes `--apk FILE`), **checks it's signed
+   with Amazon's Kindle certificate** and is the Google Play build, and installs it,
 8. adds **Kindle** to your app menu and opens it.
 
-All you do by hand: type your password, then sign in to Amazon in Kindle.
+All you do by hand: download the Kindle APK, type your password, then sign in to Amazon in
+Kindle. If you start without the APK, the installer says so at the start and stops before
+installing Kindle; rerunning once it's downloaded takes seconds.
 
 ## Use
 
