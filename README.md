@@ -93,8 +93,8 @@ command was already there).
 | RAM | 4 GB or more (Android uses ~1.3 GB) | 8 GB or more (the emulator holds ~3.5 GB) |
 | Disk | ~5 GB on the system disk | ~7 GB in your home directory |
 
-A kernel without binder gets the emulator too. Desktop: Wayland; X11 should work but is
-untested (on Waydroid, Android then runs in a hidden `cage` compositor). Image-based systems
+A kernel without binder gets the emulator too. Desktop: Wayland or X11 (on Waydroid under X11,
+Android runs in a hidden `cage` compositor; tested in nested X11 with Xephyr + Openbox). Image-based systems
 (Silverblue, Bazzite, SteamOS) need Waydroid installed their own way first (Bazzite:
 `ujust setup-waydroid`), or the emulator: `KINDLE_BACKEND=emulator ./install.sh`.
 

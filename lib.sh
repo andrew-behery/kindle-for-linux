@@ -125,11 +125,17 @@ wd_connect() {
   done
 }
 
-# The desktop's scale factor (e.g. 1.6), asked of the compositor; nothing if it can't be found.
-# Waydroid knows it by itself; the emulator needs it to draw Kindle at full resolution.
+# The desktop's scale factor (e.g. 1.6), asked of the compositor (or X11's Xft.dpi); nothing if it
+# can't be found. Waydroid on Wayland knows it by itself; the emulator and X11 need it to draw
+# Kindle at the right size and sharpness.
 display_scale() {
   local s=""
-  if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] && command -v hyprctl >/dev/null; then
+  if [[ $(display_mode) == x11 ]]; then
+    if command -v xrdb >/dev/null; then
+      s=$(xrdb -query 2>/dev/null | awk '/^Xft\.dpi:/ { if ($2 > 0) printf "%.3f\n", $2 / 96; exit }')
+    fi
+    [[ -n $s ]] || s=${GDK_SCALE:-${QT_SCALE_FACTOR:-}}
+  elif [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] && command -v hyprctl >/dev/null; then
     s=$(hyprctl monitors -j 2>/dev/null | python3 -c 'import json, sys
 m = json.load(sys.stdin); f = [x for x in m if x.get("focused")] or m
 print(f[0]["scale"])' 2>/dev/null)

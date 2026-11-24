@@ -204,7 +204,7 @@ if [[ -n $apk_arg ]]; then
 else
   note "Kindle app: Google Play's build, from APKMirror (checked) if it isn't installed yet"
 fi
-[[ $BACKEND != waydroid || $mode != x11 ]] || warn "X11 support is experimental (Android runs in a hidden cage compositor). Please report how it goes."
+[[ $BACKEND != waydroid || $mode != x11 ]] || note "X11 desktop: Waydroid will run in a hidden cage compositor."
 if ((check_only)); then
   note "(--check: stopping before any change)"
   exit 0
