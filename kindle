@@ -94,6 +94,40 @@ open_kindle() {
   ((rc == 0)) || fail "Kindle's window closed unexpectedly. Details: $log"
 }
 
+# Take Kindle to Amazon's sign-in page: its "More" tab, then "Sign In with Amazon". They're found
+# by their text in Android's description of the screen (uiautomator), so this works whatever the
+# screen's size and layout. 1 if they don't turn up (e.g. already signed in).
+open_sign_in_page() { # $1 = serial
+  local i found
+  for i in $(seq 1 20); do
+    if kfl_adb -s "$1" shell dumpsys activity activities 2>/dev/null | grep -m1 topResumedActivity | grep -q AuthPortalUIActivity; then
+      return 0
+    fi
+    found=$(ADB_TIMEOUT=20 kfl_adb -s "$1" exec-out uiautomator dump /dev/tty 2>/dev/null | python3 -c '
+import re, sys
+xml = sys.stdin.read()
+def center(want):
+    for node in re.findall(r"<node [^>]*>", xml):
+        label = " ".join(re.findall(r" (?:text|content-desc)=\"([^\"]*)\"", node)).strip().lower()
+        b = re.search(r"bounds=\"\[(\d+),(\d+)\]\[(\d+),(\d+)\]\"", node)
+        if b and want(label):
+            x1, y1, x2, y2 = map(int, b.groups())
+            return f"{(x1 + x2) // 2} {(y1 + y2) // 2}"
+for name, want in (("signin", lambda l: l.startswith("sign in with amazon")), ("more", lambda l: l == "more")):
+    c = center(want)
+    if c:
+        print(name, c)
+        break
+' 2>/dev/null || true)
+    case $found in
+      signin\ *) kfl_adb -s "$1" shell input tap ${found#signin } >/dev/null 2>&1 ;;
+      more\ *) kfl_adb -s "$1" shell input tap ${found#more } >/dev/null 2>&1 ;;
+    esac
+    sleep 2
+  done
+  return 1
+}
+
 # Amazon's sign-in page is marked secure (FLAG_SECURE): Android blanks such windows out of screen
 # captures, and Kindle's usual window is one (scrcpy). So signing in happens in a window that
 # shows Android's own screen directly: the emulator's own window, or Waydroid's full interface.
@@ -119,8 +153,13 @@ sign_in() {
   match_color_scheme "$serial"
   launch=$(kfl_adb -s "$serial" shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER "$KINDLE_PKG" | tr -d '\r' | tail -n1)
   kfl_adb -s "$serial" shell am start -n "$launch" >/dev/null 2>&1 || true
-  notify -t 0 Kindle "In this window, open More, then Sign In with Amazon. Kindle switches to its usual window once you're signed in."
-  echo "Sign in to Amazon in the Android window (More → Sign In with Amazon)."
+  if open_sign_in_page "$serial"; then
+    notify -t 0 Kindle "Sign in to Amazon in this window. Kindle switches to its usual window once you're signed in."
+    echo "Sign in to Amazon in the Android window."
+  else
+    notify -t 0 Kindle "In this window, open More, then Sign In with Amazon (if you're already signed in, just close it)."
+    echo "Sign in to Amazon in the Android window (More → Sign In with Amazon)."
+  fi
   # Wait for the sign-in: Amazon's page (AuthPortalUIActivity) comes up, and once it's gone again
   # with Kindle back in front, the sign-in is done. On the emulator, closing its window also ends
   # this. Gives up after 30 minutes.

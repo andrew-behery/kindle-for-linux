@@ -511,7 +511,9 @@ if [[ $BACKEND == emulator ]]; then
   [[ -f $ADB_HOME/.android/adbkey ]] || kfl_adb keygen "$ADB_HOME/.android/adbkey" >/dev/null 2>&1
 
   # The virtual device. 2.5 GB is ample once Google's background apps are off (Android then
-  # uses ~1.3 GB with Kindle open). Its own screen is never shown, so no cameras or sensors.
+  # uses ~1.3 GB with Kindle open). No cameras or sensors. Its own screen only appears for
+  # signing in (Kindle has its own window otherwise): a phone shape with large text, readable
+  # even in a narrow tile.
   cores=$(nproc)
   ((cores <= 4)) || cores=4
   mkdir -p "$EMU_AVD_HOME/$EMU_AVD.avd"
@@ -531,9 +533,9 @@ tag.display=Google APIs
 target=android-35
 PlayStore.enabled=false
 hw.gpu.enabled=yes
-hw.lcd.width=1280
-hw.lcd.height=800
-hw.lcd.density=160
+hw.lcd.width=720
+hw.lcd.height=1280
+hw.lcd.density=320
 hw.keyboard=yes
 hw.mainKeys=no
 hw.dPad=no
@@ -723,6 +725,16 @@ fi
 for change in OVERRIDE_ANY_ORIENTATION OVERRIDE_UNDEFINED_ORIENTATION_TO_NOSENSOR; do
   adb_shell am compat enable "$change" "$KINDLE_PKG" >/dev/null ||
     warn "Couldn't set $change: Kindle may show black bars in wide windows."
+done
+
+# Kindle asks for some Android permissions, and Android's question would appear where nobody can
+# see it (on Android's own screen, or blanked out of Kindle's window). Settle them up front:
+# notifications allowed (they never show anywhere), the rest (Bluetooth, phone state, storage:
+# nothing Kindle needs for reading) denied for good, so it doesn't ask.
+adb_shell pm grant "$KINDLE_PKG" android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true
+for perm in BLUETOOTH_CONNECT BLUETOOTH_SCAN BLUETOOTH_ADVERTISE READ_PHONE_STATE READ_EXTERNAL_STORAGE; do
+  adb_shell pm revoke "$KINDLE_PKG" "android.permission.$perm" >/dev/null 2>&1 || true
+  adb_shell pm set-permission-flags "$KINDLE_PKG" "android.permission.$perm" user-set user-fixed >/dev/null 2>&1 || true
 done
 
 # --- Launcher ----------------------------------------------------------------------------------
