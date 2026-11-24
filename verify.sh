@@ -2,9 +2,9 @@
 # Check a Kindle for Linux install and measure what it costs.
 #   ./verify.sh           checks, disk use, memory and idle CPU (asks for your password to size
 #                         Android's files, which belong to Android's own users)
-#   ./verify.sh --bench   also times opening Kindle (cold, and from frozen), resizes the window,
-#                         closes and reopens it 3 times, and counts Android crashes meanwhile
-#                         (needs Hyprland, which it asks for window positions)
+#   ./verify.sh --bench   also times opening Kindle (cold, and from frozen), closes and reopens it
+#                         3 times, and counts Android crashes meanwhile. On Hyprland it also
+#                         fullscreens the window and checks Kindle fills it each time.
 set -euo pipefail
 
 here=$(dirname "$(readlink -f "$0")")
@@ -74,6 +74,9 @@ if [[ $state == RUNNING ]]; then
     else
       bad "Kindle isn't installed"
     fi
+    overrides=$(kfl_adb -s "$serial" shell dumpsys platform_compat 2>/dev/null |
+      grep -cE "(OVERRIDE_ANY_ORIENTATION|OVERRIDE_UNDEFINED_ORIENTATION_TO_NOSENSOR);.*$KINDLE_PKG=true" || true)
+    if ((overrides == 2)); then ok "Kindle follows the window's shape (orientation overrides set)"; else bad "orientation overrides missing: Kindle letterboxes in wide windows (rerun install.sh)"; fi
     info "screen sleep: $(kfl_adb -s "$serial" shell settings get system screen_off_timeout) ms, density $(kfl_adb -s "$serial" shell wm density | sed -n 's/.*: //p' | head -n1)"
   else
     bad "adb can't reach Android"
@@ -112,9 +115,19 @@ fi
 
 if ((bench)); then
   say "Opening speed, resizing, close and reopen"
-  command -v hyprctl >/dev/null || die "--bench needs Hyprland."
   launcher=$APP_DIR/kindle
-  window() { hyprctl clients -j | jq -r --arg c "$WINDOW_ID" '.[] | select(.class == $c) | "\(.address) \(.size | join("x")) \(.stableId)"' | head -n1; }
+  # On Hyprland the window itself is watched and resized; elsewhere "open" is Kindle's first frame
+  # in scrcpy's log, and the resize checks are skipped.
+  hypr=0
+  [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] && command -v hyprctl >/dev/null && hypr=1
+  window() {
+    if ((hypr)); then
+      hyprctl clients -j | jq -r --arg c "$WINDOW_ID" '.[] | select(.class == $c) | "\(.address) \(.size | join("x")) \(.stableId)"' | head -n1
+    elif grep -qs 'Texture' "$STATE_DIR/window.log"; then
+      echo shown
+    fi
+  }
+  launcher_pid() { pgrep -u "$UID" -f "^(/usr/bin/)?bash $APP_DIR/kindle\$" | head -n1 || true; }
   # Android's crashes: native ones land in the host's coredumps (shared kernel), Java ones and
   # watchdog restarts in Android's dropbox.
   crashes() {
@@ -126,7 +139,9 @@ if ((bench)); then
     echo "$n"
   }
   time_open() {
-    local start=$(date +%s%N) deadline=$((SECONDS + 240))
+    local start deadline=$((SECONDS + 240))
+    rm -f "$STATE_DIR/window.log"
+    start=$(date +%s%N)
     setsid -f "$launcher" >/dev/null 2>&1 </dev/null
     until [[ -n $(window) ]]; do
       ((SECONDS < deadline)) || {
@@ -138,13 +153,18 @@ if ((bench)); then
     echo "$((($(date +%s%N) - start) / 1000000)) ms"
   }
   close_kindle() {
-    local addr
-    addr=$(window | cut -d' ' -f1)
-    [[ -n $addr ]] && { hyprctl dispatch "hl.dsp.window.close({ window = \"address:$addr\" })" >/dev/null 2>&1 || true; }
-    [[ -n $addr ]] && { hyprctl dispatch closewindow "address:$addr" >/dev/null 2>&1 || true; } # older Hyprland
+    local addr pid
+    if ((hypr)); then
+      addr=$(window | cut -d' ' -f1)
+      [[ -n $addr ]] && { hyprctl dispatch "hl.dsp.window.close({ window = \"address:$addr\" })" >/dev/null 2>&1 || true; }
+      [[ -n $addr ]] && { hyprctl dispatch closewindow "address:$addr" >/dev/null 2>&1 || true; } # older Hyprland
+    fi
+    pid=$(launcher_pid)
+    # Elsewhere, ask the launcher's scrcpy to quit (it exits as if the window were closed).
+    ((hypr)) || [[ -z $pid ]] || pkill -TERM -P "$pid" -x scrcpy || true
     for _ in $(seq 1 100); do
-      # Closed once the window is gone and the launcher has frozen Android.
-      [[ -z $(window) ]] && ! pgrep -u "$UID" -f "$APP_DIR/kindle\$" >/dev/null && return 0
+      # Closed once the launcher has frozen Android and exited.
+      [[ -z $(launcher_pid) ]] && return 0
       sleep 0.1
     done
   }
@@ -153,10 +173,23 @@ if ((bench)); then
     kfl_adb -s "$(android_ip):5555" shell dumpsys display 2>/dev/null |
       sed -n 's/.*DisplayDeviceInfo{"scrcpy".* \([0-9]* x [0-9]*\), modeId.*density \([0-9]*\),.*/\1 at density \2/p' | head -n1
   }
+  # Kindle's own bounds: smaller than the screen means it's letterboxed.
+  kindle_bounds() {
+    kfl_adb -s "$(android_ip):5555" shell dumpsys activity activities 2>/dev/null |
+      grep -m1 -A40 "$KINDLE_PKG/" | grep -m1 -oE 'mBounds=Rect\([^)]*\)' | sed 's/mBounds=Rect(0, 0 - \([0-9]*\), \([0-9]*\))/\1 x \2/'
+  }
   fullscreen() {
     hyprctl dispatch "hl.dsp.focus({ window = \"address:$(window | cut -d' ' -f1)\" })" >/dev/null
     hyprctl dispatch 'hl.dsp.window.fullscreen({ mode = "fullscreen" })' >/dev/null
-    sleep 2
+    sleep 3
+  }
+  shape() { # label
+    local w a k
+    w=$(window | cut -d' ' -f2)
+    a=$(vd_size)
+    k=$(kindle_bounds)
+    info "  $1: window $w, Android screen $a, Kindle $k"
+    if [[ -n $a && ${a% at *} == "$k" ]]; then ok "  Kindle fills the window"; else bad "  Kindle doesn't fill the window (letterboxed)"; fi
   }
 
   bench_start=$(date '+%Y-%m-%d %H:%M:%S')
@@ -164,11 +197,15 @@ if ((bench)); then
   "$launcher" --stop
   info "open, Android stopped (cold):  $(time_open)"
   sleep 8
-  info "  window $(window | cut -d' ' -f2), Android screen $(vd_size)"
-  fullscreen
-  info "  fullscreen: window $(window | cut -d' ' -f2), Android screen $(vd_size)"
-  fullscreen
-  info "  back: window $(window | cut -d' ' -f2), Android screen $(vd_size)"
+  if ((hypr)); then
+    shape "tiled"
+    fullscreen
+    shape "fullscreen"
+    fullscreen
+    shape "tiled again"
+  else
+    info "(resize checks need Hyprland: skipped)"
+  fi
   for i in 1 2 3; do
     close_kindle
     sleep 3

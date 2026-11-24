@@ -485,6 +485,15 @@ else
   note "Installed."
 fi
 
+# Kindle's phone layout (used when the window is under 600 px tall, or narrow) locks itself to
+# portrait, which leaves a wide window letterboxed: Kindle in a strip down the middle. Android's
+# compatibility overrides make it follow the window instead: whatever orientation Kindle asks
+# for becomes "the screen's own". They belong to Kindle's install, so set them every run.
+for change in OVERRIDE_ANY_ORIENTATION OVERRIDE_UNDEFINED_ORIENTATION_TO_NOSENSOR; do
+  adb_shell am compat enable "$change" "$KINDLE_PKG" >/dev/null ||
+    warn "Couldn't set $change: Kindle may show black bars in wide windows."
+done
+
 # --- Launcher ----------------------------------------------------------------------------------
 
 say "Adding Kindle to your app menu"

@@ -28,12 +28,13 @@ open_kindle() {
   exec 9>"$STATE_DIR/window.lock"
   flock -w 5 9 || exit 0
 
-  if [[ $(session_state) != RUNNING ]]; then
-    notify Kindle "Starting Android…"
-    start_android 180 || fail "Android didn't start within 3 minutes. Details: $STATE_DIR/session.log"
-  elif [[ $(container_state) == FROZEN ]]; then
-    container_call Unfreeze || true
-  fi
+  case $(android_state) in
+    STOPPED)
+      notify Kindle "Starting Android…"
+      start_android 180 || fail "Android didn't start within 3 minutes. Details: $STATE_DIR/session.log"
+      ;;
+    FROZEN) container_call Unfreeze || true ;;
+  esac
   if ! serial=$(android_connect 15); then
     # Android is up but unreachable: after its core restarts (a crash), it can come back without
     # its network. A fresh start fixes that.
@@ -43,21 +44,27 @@ open_kindle() {
     serial=$(android_connect 60) || fail "Can't reach Android. Try: kindle --stop, then open Kindle again."
   fi
   hide_waydroid_entry
-  # Waydroid sets Android's density to 180 × the display's scale factor (an override set with
-  # `wm density` wins). scrcpy would otherwise give its screen 160, too small on scaled displays.
+  # Kindle's screen density: Android's standard 160 × the display's scale factor, so one Android
+  # dp is one desktop pixel. Waydroid sets 180 × scale, which makes Kindle 12% larger than other
+  # apps and shrinks a window's height in dp below 600, where Kindle switches to its phone layout
+  # and locks it to portrait (letterboxed in a wide window). An override set with `wm density`
+  # wins. scrcpy's own default is 160 whatever the scale.
   local density
   density=$(kfl_adb -s "$serial" shell wm density 2>/dev/null | tr -d '\r' |
-    awk -F': ' '/^Override/ { o = $2 } /^Physical/ { p = $2 } END { print (o ? o : p) }')
-  [[ $density =~ ^[0-9]+$ ]] || density=180
+    awk -F': ' '/^Override/ { o = $2 } /^Physical/ { p = $2 } END { print (o ? o : int(p * 160 / 180 + 0.5)) }')
+  [[ $density =~ ^[0-9]+$ && $density -gt 0 ]] || density=160
+  [[ ${KINDLE_DENSITY:-} =~ ^[0-9]+$ ]] && density=$KINDLE_DENSITY # bigger = larger text and buttons
 
   # Freeze Android once the window closes. The pause lets scrcpy finish removing its screen.
   trap 'sleep 2; container_call Freeze || true' EXIT
+
   local server=()
   [[ -f $SCRCPY_DIR/scrcpy-server ]] && server=(SCRCPY_SERVER_PATH="$SCRCPY_DIR/scrcpy-server")
   # SDL_VIDEO_WAYLAND_SCALE_TO_DISPLAY sizes the window in real pixels, so on a scaled display
-  # Android draws at full resolution (sharp text) at the density Waydroid derived from the scale.
+  # Android draws at full resolution (sharp text). stdbuf: scrcpy writes its log line by line
+  # (redirected to a file it would hold the lines back until it exits).
   env ADB="$(adb_bin)" "${server[@]}" SDL_APP_ID="$WINDOW_ID" SCRCPY_ICON_PATH="$KINDLE_ICON" \
-    SDL_VIDEO_WAYLAND_SCALE_TO_DISPLAY=1 \
+    SDL_VIDEO_WAYLAND_SCALE_TO_DISPLAY=1 stdbuf -oL -eL \
     "$(scrcpy_bin)" --serial="$serial" --new-display=/"$density" --flex-display --start-app="$KINDLE_PKG" \
     --window-title=Kindle --no-audio >"$log" 2>&1 </dev/null 9>&- || rc=$?
   # 0 = window closed. Anything else means Android dropped the connection or scrcpy failed.

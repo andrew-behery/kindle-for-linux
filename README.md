@@ -49,6 +49,10 @@ Open **Kindle** from your app menu, or run `kindle`.
 - The first open after logging in starts Android in the background (about 15 s). After that,
   Android stays loaded but frozen while Kindle is closed, so it opens again in about a second.
 - Copy and paste work between Kindle and your other apps (Ctrl+C / Ctrl+V).
+- Kindle reflows to fill its window whatever the shape: tiled, side by side, or fullscreen.
+- Everything in Kindle is sized like your other apps. For larger or smaller text and buttons
+  everywhere, set a density: `KINDLE_DENSITY=200 kindle` (the default is 160 × your display's
+  scale). Book text size is also in Kindle's own reading settings.
 - `kindle --stop` shuts Android down and frees its memory. `kindle --status` shows its state.
 
 ## Requirements
@@ -70,7 +74,8 @@ install Waydroid the way your system recommends (Bazzite: `ujust setup-waydroid`
 ```sh
 ./verify.sh          # checks the install, shows disk use, memory and idle CPU
 ./verify.sh --bench  # also times opening Kindle, resizes it, closes and reopens it 3 times
-                     # and counts Android crashes (Hyprland only for now)
+                     # and counts Android crashes; on Hyprland it also checks Kindle
+                     # fills the window when tiled and fullscreen
 ```
 
 ## Uninstall

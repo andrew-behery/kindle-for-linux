@@ -41,6 +41,19 @@ state_set() {
 # "RUNNING", "FROZEN" or "STOPPED" (from `waydroid status`, whose lines are "Key:<tab>Value").
 session_state() { timeout 10 waydroid status 2>/dev/null | awk -F':[ \t]+' '$1 == "Session" { print $2 }'; }
 container_state() { timeout 10 waydroid status 2>/dev/null | awk -F':[ \t]+' '$1 == "Container" { print $2 }'; }
+# The same as one word, fast: Android's container is an LXC cgroup whose cgroup.events says
+# whether it's frozen, which takes no time, while each `waydroid status` takes ~0.4 s. Falls back
+# to Waydroid where the cgroup lives elsewhere.
+WAYDROID_CGROUP=/sys/fs/cgroup/lxc.payload.waydroid
+android_state() { # RUNNING, FROZEN or STOPPED
+  if [[ -r $WAYDROID_CGROUP/cgroup.events ]]; then
+    if grep -qx 'frozen 1' "$WAYDROID_CGROUP/cgroup.events"; then echo FROZEN; else echo RUNNING; fi
+  elif [[ $(session_state) == RUNNING ]]; then
+    container_state
+  else
+    echo STOPPED
+  fi
+}
 # `waydroid prop get` and `waydroid app list` retry forever while Android's core is down, so cap them.
 android_booted() { [[ $(timeout 15 waydroid prop get sys.boot_completed 2>/dev/null) == 1 ]]; }
 
@@ -68,22 +81,28 @@ adb_bin() { if [[ -x $SCRCPY_DIR/adb ]]; then echo "$SCRCPY_DIR/adb"; else comma
 kfl_adb() { HOME=$ADB_HOME timeout "${ADB_TIMEOUT:-30}" "$(adb_bin)" "$@" 9>&-; }
 
 # Connect our adb to Android and print its serial. $1 = seconds to keep trying (default 20).
+# Android's address rarely changes, so the last one is tried first (asking Waydroid takes ~0.4 s).
 android_connect() {
-  local serial st deadline=$((SECONDS + ${1:-20}))
+  local serial st try deadline=$((SECONDS + ${1:-20})) cache=$STATE_DIR/android.serial
   kfl_adb start-server >/dev/null 2>&1 || return 1
+  serial=$(cat "$cache" 2>/dev/null || true)
   while :; do
-    serial=$(android_ip):5555
-    if [[ $serial != :5555 ]]; then
-      st=$(HOME=$ADB_HOME timeout 5 "$(adb_bin)" -s "$serial" get-state 2>/dev/null 9>&- || true)
-      if [[ $st == device ]]; then
-        echo "$serial"
-        return 0
-      fi
-      [[ $st == offline ]] && kfl_adb disconnect "$serial" >/dev/null 2>&1
-      HOME=$ADB_HOME timeout 5 "$(adb_bin)" connect "$serial" >/dev/null 2>&1 9>&- || true
+    if [[ $serial =~ ^[0-9.]+:5555$ ]]; then
+      for try in 1 2; do
+        st=$(HOME=$ADB_HOME timeout 5 "$(adb_bin)" -s "$serial" get-state 2>/dev/null 9>&- || true)
+        if [[ $st == device ]]; then
+          [[ $(cat "$cache" 2>/dev/null) == "$serial" ]] || { mkdir -p "$STATE_DIR" && echo "$serial" >"$cache"; }
+          echo "$serial"
+          return 0
+        fi
+        ((try == 1)) || break
+        [[ $st != offline ]] || kfl_adb disconnect "$serial" >/dev/null 2>&1 || true
+        HOME=$ADB_HOME timeout 5 "$(adb_bin)" connect "$serial" >/dev/null 2>&1 9>&- || true
+      done
     fi
     ((SECONDS < deadline)) || return 1
     sleep 0.5
+    serial=$(android_ip):5555
   done
 }
 
