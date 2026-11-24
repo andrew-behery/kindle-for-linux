@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Kindle for Linux: sets up the real Kindle Android app in Waydroid, tuned to open fast and stay small.
 # No Google account, no Play Store, nothing to register: the Kindle app is downloaded directly and
-# checked against Amazon's signing certificate before it's installed.
+# checked against Amazon's signing certificate before it's installed. Kindle's window is scrcpy,
+# showing a virtual Android screen that resizes with the window.
 #
 #   ./install.sh                 run as your normal user, in a terminal inside your desktop session
 #   ./install.sh --apk FILE      install Kindle from an APK you already have (still checked)
@@ -30,6 +31,12 @@ VENDOR_ZIP_x86_64=lineage-20.0-20260428-MAINLINE-waydroid_x86_64-vendor.zip
 VENDOR_URL_x86_64=$SF/vendor/waydroid_x86_64/$VENDOR_ZIP_x86_64/download
 VENDOR_SHA256_x86_64=cba35433ffca73ed349e096b1daec495b3204e01c0e541c4203671e6d648e874
 IMAGES_DIR=/etc/waydroid-extra/images # Waydroid boots from images here instead of downloading its own
+
+# scrcpy's official Linux build (x86_64), which includes its own adb. Virtual screens that follow
+# the window (--flex-display) need scrcpy 4.1 or newer; ARM64 takes the distro's scrcpy.
+SCRCPY_VERSION=5.0.1
+SCRCPY_URL_x86_64=https://github.com/Genymobile/scrcpy/releases/download/v$SCRCPY_VERSION/scrcpy-linux-x86_64-v$SCRCPY_VERSION.tar.gz
+SCRCPY_SHA256_x86_64=9f969d30cc574816077edecda65719c1c70b0aee1df1ba5fa00779ac07b8fd6e
 
 # The certificate Amazon signs the Kindle app with (SHA-256). Android refuses an APK whose
 # signatures don't verify against the certificate inside it, so matching this proves who made it.
@@ -108,6 +115,13 @@ else
   gpu_note="the GPU ($(grep -vw nvidia <<<"${gpu_drivers// /$'\n'}" | head -n1))"
 fi
 
+# Kindle's window is a video stream from Android. With no GPU it can use (NVIDIA-only machines),
+# Android draws on the CPU, and its video encoder then crashes, so there's no picture.
+if [[ $gpu_note == "the CPU"* ]]; then
+  die "This computer has no GPU Android can use (${gpu_drivers:-none found}). Waydroid skips NVIDIA
+  GPUs, and without a GPU Kindle's window can't work. NVIDIA-only computers aren't supported yet."
+fi
+
 if [[ $arch == x86_64 ]]; then
   # Kindle ships ARM code only, so x86_64 machines need a translation layer. Intel's libhoudini
   # runs best on Intel CPUs; Google's libndk on AMD.
@@ -119,20 +133,32 @@ note "Desktop: $mode${pm:+, package manager: ${pm%-get}}"
 note "Android will draw with $gpu_note"
 [[ $arch == x86_64 ]] && note "ARM translation: $arm_layer (Kindle is ARM-only)"
 note "Log: $LOG"
+[[ $mode == x11 ]] && warn "X11 support is experimental (Android runs in a hidden cage compositor). Please report how it goes."
 if ((check_only)); then
   note "(--check: stopping before any change)"
   exit 0
 fi
 
-# Ask for the password once, and keep sudo alive through the long downloads.
-sudo -v
-while true; do
-  sudo -n true
-  sleep 50
-  kill -0 "$$" 2>/dev/null || exit
-done 2>/dev/null &
-sudo_keepalive=$!
-trap 'kill "$sudo_keepalive" 2>/dev/null || true' EXIT
+# Root is only needed for system changes. The password is asked the first time one is needed, then
+# kept alive through the long downloads; a rerun with nothing left to change needs no password.
+root_ready=0
+root() {
+  if ((!root_ready)); then
+    if ! sudo -n true 2>/dev/null; then
+      [[ -t 0 ]] || die "This step needs your password: run ./install.sh in a terminal on this computer."
+      sudo -v || die "Couldn't get administrator rights."
+    fi
+    while true; do
+      sudo -n true
+      sleep 50
+      kill -0 "$$" 2>/dev/null || exit
+    done 2>/dev/null &
+    sudo_keepalive=$!
+    trap 'kill "$sudo_keepalive" 2>/dev/null || true' EXIT
+    root_ready=1
+  fi
+  sudo "$@"
+}
 
 # --- Packages ----------------------------------------------------------------------------------
 
@@ -142,20 +168,20 @@ add_waydroid_apt_repo() {
   codename=$(. /etc/os-release && echo "${UBUNTU_CODENAME:-${DEBIAN_CODENAME:-${VERSION_CODENAME:-}}}")
   [[ -n $codename ]] || die "Couldn't tell which Debian/Ubuntu release this is."
   note "Adding Waydroid's apt repository for '$codename'"
-  sudo curl -fsS --proto '=https' https://repo.waydro.id/waydroid.gpg -o /usr/share/keyrings/waydroid.gpg
+  root curl -fsS --proto '=https' https://repo.waydro.id/waydroid.gpg -o /usr/share/keyrings/waydroid.gpg
   echo "deb [signed-by=/usr/share/keyrings/waydroid.gpg] https://repo.waydro.id/ $codename main" |
-    sudo tee /etc/apt/sources.list.d/waydroid.list >/dev/null
-  sudo apt-get update ||
+    root tee /etc/apt/sources.list.d/waydroid.list >/dev/null
+  root apt-get update ||
     die "Waydroid has no packages for '$codename'. Supported: Debian 11-13, Ubuntu 20.04 and newer, and distros based on them."
   state_set apt_repo_added 1
 }
 
 pkg_install() {
   case $pm in
-    pacman) sudo pacman -S --needed --noconfirm "$@" ;;
-    apt-get) sudo apt-get install -y "$@" ;;
-    dnf) sudo dnf install -y "$@" ;;
-    zypper) sudo zypper --non-interactive install "$@" ;;
+    pacman) root pacman -S --needed --noconfirm "$@" ;;
+    apt-get) root apt-get install -y "$@" ;;
+    dnf) root dnf install -y "$@" ;;
+    zypper) root zypper --non-interactive install "$@" ;;
     *) return 1 ;;
   esac
 }
@@ -166,9 +192,17 @@ install_packages() {
   [[ $mode == x11 ]] && ! command -v cage >/dev/null && pkgs+=(cage)
   # waydroid_script runs in a Python venv; Debian-based systems ship venv support separately.
   [[ $arch == x86_64 && $pm == apt-get ]] && ! python3 -c 'import ensurepip' 2>/dev/null && pkgs+=(python3-venv)
+  # No official scrcpy build for ARM64 Linux: use the distro's.
+  if [[ $arch == aarch64 ]]; then
+    command -v scrcpy >/dev/null || pkgs+=(scrcpy)
+    if ! command -v adb >/dev/null; then
+      case $pm in apt-get) pkgs+=(adb) ;; *) pkgs+=(android-tools) ;; esac
+    fi
+  fi
   if ((${#pkgs[@]})); then
     [[ " ${pkgs[*]} " == *" waydroid "* ]] && state_set waydroid_installed_by_us 1
     [[ " ${pkgs[*]} " == *" cage "* ]] && state_set cage_installed_by_us 1
+    [[ " ${pkgs[*]} " == *" scrcpy "* ]] && state_set scrcpy_installed_by_us 1
     if [[ $pm == apt-get && " ${pkgs[*]} " == *" waydroid "* && $(apt-cache policy waydroid 2>/dev/null || true) != *"Candidate: "[0-9]* ]]; then
       add_waydroid_apt_repo
     fi
@@ -176,22 +210,6 @@ install_packages() {
       die "Installing ${pkgs[*]} failed.${pm:+ Update your system first, then rerun.}"
   else
     note "Waydroid is already installed."
-  fi
-
-  # Copy and paste between Linux and Android: Waydroid's clipboard bridge needs pyclip, which in
-  # turn uses wl-clipboard (Wayland) or xclip (X11). Optional: Kindle works without it.
-  if ! python3 -c 'import pyclip' 2>/dev/null; then
-    local clip=() tool=wl-clipboard
-    [[ $mode == x11 ]] && tool=xclip
-    case $pm in
-      pacman) clip=(python-pyclip "$tool") ;;
-      apt-get | dnf | zypper) clip=(python3-pyclip "$tool") ;;
-    esac
-    if ((${#clip[@]})) && pkg_install "${clip[@]}"; then
-      note "Clipboard sharing installed (${clip[*]})."
-    else
-      warn "Couldn't install clipboard sharing (pyclip). Kindle works without it, but copy/paste between Linux and Android won't."
-    fi
   fi
 }
 
@@ -204,7 +222,7 @@ note "$(waydroid --version 2>/dev/null | head -n1)"
 
 # --- Android images ----------------------------------------------------------------------------
 
-images_current() { sudo test -f "$IMAGES_DIR/kindle-for-linux.version" && [[ $(sudo cat "$IMAGES_DIR/kindle-for-linux.version") == "$IMAGES_VERSION" ]]; }
+images_current() { [[ -r $IMAGES_DIR/kindle-for-linux.version && $(<"$IMAGES_DIR/kindle-for-linux.version") == "$IMAGES_VERSION" ]]; }
 
 fetch_verified() { # url sha256 file
   local url=$1 sum=$2 file=$3
@@ -214,10 +232,10 @@ fetch_verified() { # url sha256 file
   mv "$file.part" "$file"
 }
 
-if images_current && sudo test -f "$WAYDROID_CFG"; then
+if images_current && [[ -f $WAYDROID_CFG ]]; then
   note "Android ($IMAGES_VERSION) is already set up."
 else
-  if sudo test -f "$WAYDROID_CFG" && [[ $(state_get waydroid_preexisting) == 1 && -z $(state_get images_installed_by_us) ]]; then
+  if [[ -f $WAYDROID_CFG ]] && [[ $(state_get waydroid_preexisting) == 1 && -z $(state_get images_installed_by_us) ]]; then
     warn "Waydroid is already set up on this computer with other Android images."
     note "Kindle needs Android without Google, on images that don't crash when windows open and close."
     note "Switching keeps your Android apps' data, but apps that depend on Google Play will stop working."
@@ -230,65 +248,102 @@ else
     fetch_verified "$SYSTEM_URL_x86_64" "$SYSTEM_SHA256_x86_64" "$CACHE_DIR/$SYSTEM_ZIP_x86_64"
     fetch_verified "$VENDOR_URL_x86_64" "$VENDOR_SHA256_x86_64" "$CACHE_DIR/$VENDOR_ZIP_x86_64"
     stop_android
-    sudo systemctl stop waydroid-container.service 2>/dev/null || true
-    sudo mkdir -p "$IMAGES_DIR"
-    sudo unzip -oq "$CACHE_DIR/$SYSTEM_ZIP_x86_64" -d "$IMAGES_DIR"
-    sudo unzip -oq "$CACHE_DIR/$VENDOR_ZIP_x86_64" -d "$IMAGES_DIR"
-    echo "$IMAGES_VERSION" | sudo tee "$IMAGES_DIR/kindle-for-linux.version" >/dev/null
+    root systemctl stop waydroid-container.service 2>/dev/null || true
+    root mkdir -p "$IMAGES_DIR"
+    root unzip -oq "$CACHE_DIR/$SYSTEM_ZIP_x86_64" -d "$IMAGES_DIR"
+    root unzip -oq "$CACHE_DIR/$VENDOR_ZIP_x86_64" -d "$IMAGES_DIR"
+    echo "$IMAGES_VERSION" | root tee "$IMAGES_DIR/kindle-for-linux.version" >/dev/null
     rm -f "$CACHE_DIR/$SYSTEM_ZIP_x86_64" "$CACHE_DIR/$VENDOR_ZIP_x86_64" # the unpacked images are all Waydroid needs
     state_set images_installed_by_us 1
     say "Setting up Android"
-    sudo waydroid init -f
+    root waydroid init -f
     # Images Waydroid downloaded earlier (e.g. the Google Play ones) are no longer used.
-    if [[ $(state_get waydroid_preexisting) != 1 ]] && sudo test -e /var/lib/waydroid/images/system.img; then
-      sudo rm -f /var/lib/waydroid/images/system.img /var/lib/waydroid/images/vendor.img
+    if [[ $(state_get waydroid_preexisting) != 1 ]] && [[ -e /var/lib/waydroid/images/system.img ]]; then
+      root rm -f /var/lib/waydroid/images/system.img /var/lib/waydroid/images/vendor.img
       note "Removed the old Android images Waydroid no longer uses."
     fi
   else
     # No pinned ARM64 images yet: take Waydroid's current Google-free images.
     warn "ARM64: using Waydroid's latest images, which may have the window crash described above."
     say "Downloading Android without Google"
-    sudo waydroid init -f -s VANILLA
+    root waydroid init -f -s VANILLA
   fi
+fi
+
+# Google apps that updated themselves while an earlier Google Play image was in use stay in
+# Android's app storage. Without Google's system image they lose their privileges, and Play
+# Services then crashes Android's core on every boot. Move them aside (kept, not deleted).
+list_google_leftovers() {
+  local dir=$WAYDROID_DATA/data/app
+  if [[ -r $dir && -x $dir ]]; then
+    find "$dir" -mindepth 2 -maxdepth 2 \( -name 'com.google.android.*' -o -name 'com.android.vending-*' \) 2>/dev/null || true
+  elif [[ -d $dir ]]; then
+    root find "$dir" -mindepth 2 -maxdepth 2 \( -name 'com.google.android.*' -o -name 'com.android.vending-*' \) 2>/dev/null || true
+  fi
+}
+leftovers=$(list_google_leftovers)
+if [[ -n $leftovers ]]; then
+  say "Moving leftover Google apps out of Android's way"
+  stop_android
+  backup=$STATE_DIR/google-leftovers
+  while IFS= read -r app; do
+    root mkdir -p "$backup/$(basename "$(dirname "$app")")"
+    root mv "$app" "$backup/$(basename "$(dirname "$app")")/"
+    root rmdir "$(dirname "$app")" 2>/dev/null || true
+    note "${app##*/}"
+  done <<<"$leftovers"
+  note "(kept in $backup)"
 fi
 
 # Firewalls drop traffic routed through Waydroid's bridge, which leaves Android offline.
 ufw_status=""
-command -v ufw >/dev/null && ufw_status=$(sudo ufw status 2>/dev/null || true)
-if [[ $ufw_status == *"Status: active"* ]]; then
+if command -v ufw >/dev/null && systemctl is-active -q ufw 2>/dev/null && [[ -z $(state_get ufw_ok) ]]; then
+  ufw_status=$(root ufw status 2>/dev/null || true)
+fi
+if [[ -n $(state_get ufw_ok) ]]; then
+  note "Firewall (ufw) already lets Android online."
+elif [[ $ufw_status == *"Status: active"* ]]; then
   if [[ $ufw_status == *waydroid0* ]]; then
     note "Firewall (ufw) already lets Android online."
   else
     say "Letting Android through the firewall (ufw)"
-    sudo ufw allow in on waydroid0 to any port 53 comment 'waydroid dns'
-    sudo ufw allow in on waydroid0 to any port 67 proto udp comment 'waydroid dhcp'
-    sudo ufw route allow in on waydroid0 comment 'waydroid outbound'
-    sudo ufw route allow out on waydroid0 comment 'waydroid return'
+    root ufw allow in on waydroid0 to any port 53 comment 'waydroid dns'
+    root ufw allow in on waydroid0 to any port 67 proto udp comment 'waydroid dhcp'
+    root ufw route allow in on waydroid0 comment 'waydroid outbound'
+    root ufw route allow out on waydroid0 comment 'waydroid return'
     state_set ufw_rules_added 1
   fi
-elif command -v firewall-cmd >/dev/null && sudo firewall-cmd --state >/dev/null 2>&1; then
-  if sudo firewall-cmd --zone=trusted --query-interface=waydroid0 >/dev/null 2>&1; then
+  state_set ufw_ok 1
+elif [[ -n $(state_get firewalld_ok) ]]; then
+  note "Firewall (firewalld) already lets Android online."
+elif command -v firewall-cmd >/dev/null && systemctl is-active -q firewalld 2>/dev/null; then
+  if root firewall-cmd --zone=trusted --query-interface=waydroid0 >/dev/null 2>&1; then
     note "Firewall (firewalld) already lets Android online."
   else
     say "Letting Android through the firewall (firewalld)"
-    sudo firewall-cmd --zone=trusted --add-interface=waydroid0
-    sudo firewall-cmd --zone=trusted --add-port=53/udp --add-port=67/udp
-    sudo firewall-cmd --zone=trusted --add-forward
-    sudo firewall-cmd --runtime-to-permanent
+    root firewall-cmd --zone=trusted --add-interface=waydroid0
+    root firewall-cmd --zone=trusted --add-port=53/udp --add-port=67/udp
+    root firewall-cmd --zone=trusted --add-forward
+    root firewall-cmd --runtime-to-permanent
     state_set firewalld_rules_added 1
   fi
+  state_set firewalld_ok 1
 fi
 
-say "Starting Waydroid's background service"
-sudo systemctl enable --now waydroid-container.service
+if systemctl is-enabled -q waydroid-container.service 2>/dev/null && systemctl is-active -q waydroid-container.service; then
+  note "Waydroid's background service is running."
+else
+  say "Starting Waydroid's background service"
+  root systemctl enable --now waydroid-container.service
+fi
 
 # --- ARM translation (x86_64 only) -------------------------------------------------------------
 
 # `waydroid init` clears Waydroid's overlay, where the translation libraries live, so check both
 # the setting and the files.
 if [[ $arch == x86_64 ]]; then
-  if sudo grep -q 'native.bridge' "$WAYDROID_CFG" 2>/dev/null &&
-    sudo find /var/lib/waydroid/overlay/system -name 'libhoudini.so' -o -name 'libndk_translation.so' 2>/dev/null | grep -q .; then
+  if grep -q 'native.bridge' "$WAYDROID_CFG" 2>/dev/null &&
+    find /var/lib/waydroid/overlay/system -name 'libhoudini.so' -o -name 'libndk_translation.so' 2>/dev/null | grep -q .; then
     note "ARM translation is already installed."
   else
     say "Adding ARM translation ($arm_layer)"
@@ -306,53 +361,106 @@ if [[ $arch == x86_64 ]]; then
       "$ws/venv/bin/pip" install --quiet --disable-pip-version-check -r "$ws/requirements.txt"
     fi
     stop_android
-    (cd "$ws" && sudo "$ws/venv/bin/python3" -W ignore main.py install "$arm_layer")
-    sudo grep -q 'native.bridge' "$WAYDROID_CFG" || die "ARM translation didn't install. See $LOG"
+    (cd "$ws" && root "$ws/venv/bin/python3" -W ignore main.py install "$arm_layer")
+    grep -q 'native.bridge' "$WAYDROID_CFG" || die "ARM translation didn't install. See $LOG"
     state_set arm_layer "$arm_layer"
   fi
 fi
 
-# --- Android settings --------------------------------------------------------------------------
+# --- Kindle's window (scrcpy) ------------------------------------------------------------------
 
-android_shell() { sudo waydroid shell -- "$@"; }
-
-if [[ $mode == x11 ]]; then
-  note "On X11, Android opens in a window of its own (cage) and stays there during setup."
-  warn "X11 support is experimental. Please report how it goes."
+say "Kindle's window (scrcpy)"
+if [[ $arch == x86_64 ]]; then
+  if [[ -x $SCRCPY_DIR/scrcpy && $(cat "$SCRCPY_DIR/kindle-for-linux.version" 2>/dev/null) == "$SCRCPY_VERSION" ]]; then
+    note "scrcpy $SCRCPY_VERSION is already installed."
+  else
+    note "Downloading scrcpy $SCRCPY_VERSION (official build, checksum-verified)"
+    mkdir -p "$CACHE_DIR"
+    tarball=$CACHE_DIR/scrcpy-linux-x86_64-v$SCRCPY_VERSION.tar.gz
+    fetch_verified "$SCRCPY_URL_x86_64" "$SCRCPY_SHA256_x86_64" "$tarball"
+    rm -rf "$SCRCPY_DIR"
+    mkdir -p "$SCRCPY_DIR"
+    tar -xzf "$tarball" -C "$SCRCPY_DIR" --strip-components=1
+    echo "$SCRCPY_VERSION" >"$SCRCPY_DIR/kindle-for-linux.version"
+    rm -f "$tarball"
+  fi
+else
+  v=$(scrcpy --version 2>/dev/null | awk 'NR == 1 { print $2 }')
+  [[ -n $v && $(printf '%s\n' 4.1 "$v" | sort -V | head -n1) == 4.1 ]] ||
+    die "Kindle's window needs scrcpy 4.1 or newer; your distro has ${v:-none}. Install a newer scrcpy, then rerun."
+  note "scrcpy $v (from your distro)"
 fi
+
+# --- Android settings --------------------------------------------------------------------------
 
 say "Starting Android (the first start takes a minute)"
 start_android 300 || die "Android didn't start. Details: $STATE_DIR/session.log"
 
 say "Tuning Android for reading"
 changed=0
-# One window holds Android. Per-app windows (multi_windows) are where the crash in
-# waydroid#2436 lives, so they stay off until that's fixed and tested.
+# One display for Android. Per-app windows (multi_windows) are where the crash in waydroid#2436
+# lives, and Kindle's window comes from scrcpy anyway.
+# (The values found are recorded, so uninstall.sh can put back a Waydroid that was here before.)
+for prop in multi_windows suspend; do
+  [[ -n $(state_get "prev_$prop") ]] || state_set "prev_$prop" "$(waydroid prop get "persist.waydroid.$prop" 2>/dev/null || true)"
+done
 if [[ $(waydroid prop get persist.waydroid.multi_windows) != false ]]; then
   waydroid prop set persist.waydroid.multi_windows false
   changed=1
 fi
-# Let Android go to sleep (Waydroid then freezes it: no CPU use) when no app is open.
-if [[ $(waydroid prop get persist.waydroid.suspend) != true ]]; then
-  waydroid prop set persist.waydroid.suspend true
+# Waydroid freezes Android whenever its own display has nothing to show, and with Kindle in
+# scrcpy's window that is always. So Android doesn't freeze itself; the launcher freezes it
+# when Kindle's window closes.
+if [[ $(waydroid prop get persist.waydroid.suspend) != false ]]; then
+  waydroid prop set persist.waydroid.suspend false
   changed=1
 fi
-# No window animations: pages and menus appear at once.
-for key in window_animation_scale transition_animation_scale animator_duration_scale; do
-  android_shell settings put global "$key" 0 || warn "Couldn't set $key."
-done
-android_shell cmd uimode night yes >/dev/null || warn "Couldn't turn on dark mode." # Kindle follows it
-note "One Android window, sleep when idle, no animations, dark mode."
-
 if ((changed)); then
-  say "Restarting Android so the changes take effect"
+  note "Restarting Android so the changes take effect"
   stop_android
   start_android 180 || die "Android didn't restart. Details: $STATE_DIR/session.log"
 fi
+[[ $(container_state) != FROZEN ]] || container_call Unfreeze || true
+
+# Our adb talks to Android to set it up and to show Kindle. Android only lets in adb keys listed
+# in its adb_keys file, so add ours there (no "Allow USB debugging?" prompt to click).
+trust_adb_key() {
+  local dir=$WAYDROID_DATA/data/misc/adb run=()
+  if [[ ! -f $ADB_HOME/.android/adbkey ]]; then
+    mkdir -p "$ADB_HOME/.android"
+    kfl_adb keygen "$ADB_HOME/.android/adbkey" >/dev/null 2>&1 || die "Couldn't create an adb key."
+  fi
+  # Android's files belong to its system user (uid 1000): writing them needs root unless that's us.
+  [[ -w $dir ]] || run=(root)
+  "${run[@]}" bash -c '
+    f=$1/adb_keys key=$(<"$2")
+    grep -qsF "${key%% *}" "$f" && exit 0
+    if [[ -s $f && -n $(tail -c1 "$f") ]]; then echo >>"$f"; fi # adb writes keys without a newline
+    printf "%s\n" "$key" >>"$f"
+    chmod 640 "$f"
+    chown 1000:2000 "$f" 2>/dev/null || true' _ "$dir" "$ADB_HOME/.android/adbkey.pub"
+}
+trust_adb_key
+serial=$(android_connect 60) || die "Couldn't connect to Android with adb. Details: $LOG"
+adb_shell() { kfl_adb -s "$serial" shell "$@"; }
+
+# These live in Android's data, so they survive restarts and image switches: set them once.
+# No window animations (pages and menus appear at once), dark mode (Kindle follows it), and no
+# screen sleep, which would blank the page you're reading (Android is frozen whenever Kindle's
+# window is closed, so this costs nothing).
+if [[ $(state_get android_tuned) != 2 ]]; then
+  for key in window_animation_scale transition_animation_scale animator_duration_scale; do
+    adb_shell settings put global "$key" 0 || warn "Couldn't set $key."
+  done
+  adb_shell settings put system screen_off_timeout 2147483647 || warn "Couldn't turn off screen sleep."
+  adb_shell cmd uimode night yes >/dev/null || warn "Couldn't turn on dark mode."
+  state_set android_tuned 2
+fi
+note "One display, frozen while Kindle is closed, no animations, dark mode, no screen sleep."
 
 # --- Kindle ------------------------------------------------------------------------------------
 
-if kindle_installed && [[ -z $apk_arg ]]; then
+if [[ $(adb_shell pm path "$KINDLE_PKG" 2>/dev/null) == package:* && -z $apk_arg ]]; then
   note "Kindle is already installed."
 else
   mkdir -p "$CACHE_DIR"
@@ -369,14 +477,12 @@ else
   else
     die "$(basename "$apk") is NOT signed by Amazon's Kindle certificate. Not installing it."
   fi
-  say "Installing Kindle"
-  waydroid app install "$apk"
+  say "Installing Kindle (Android prepares the app under ARM translation, which takes a minute)"
+  # -r keeps an installed Kindle's data (your sign-in and books) when replacing it.
+  out=$(timeout 600 env HOME="$ADB_HOME" "$(adb_bin)" -s "$serial" install -r "$apk" 2>&1) || true
   [[ -n $apk_arg ]] || rm -f "$apk"
-  for _ in $(seq 1 120); do # Android compiles the app on install, which takes a while under ARM translation
-    kindle_installed && break
-    sleep 1
-  done
-  kindle_installed || die "Kindle didn't install. Details: waydroid log"
+  [[ $out == *Success* ]] || die "Kindle didn't install: ${out##*$'\n'}"
+  note "Installed."
 fi
 
 # --- Launcher ----------------------------------------------------------------------------------
@@ -409,7 +515,7 @@ Icon=$KINDLE_ICON
 Terminal=false
 Categories=Office;Viewer;
 Keywords=ebook;books;reader;amazon;
-StartupWMClass=waydroid.$KINDLE_PKG
+StartupWMClass=$WINDOW_ID
 EOF
 hide_waydroid_entry
 update-desktop-database "$APPS_DIR" >/dev/null 2>&1 || true
@@ -419,4 +525,4 @@ note "Menu entry \"$entry_name\", command: $cmd_name"
 say "Done"
 note "Open Kindle from your app menu (\"$entry_name\") or with: $cmd_name"
 note "The first time, sign in to your Amazon account inside Kindle."
-"$APP_DIR/kindle" || true
+setsid -f "$APP_DIR/kindle" >/dev/null 2>&1 </dev/null

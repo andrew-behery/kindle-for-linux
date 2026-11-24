@@ -38,12 +38,25 @@ remove_pkgs() {
   esac
 }
 
+kfl_adb kill-server >/dev/null 2>&1 || true
+
 if [[ $preexisting == 1 ]]; then
   say "Removing Kindle from Waydroid"
   if start_android 180; then
+    [[ $(container_state) != FROZEN ]] || container_call Unfreeze || true
     sudo waydroid shell -- pm uninstall "$KINDLE_PKG" >/dev/null || true
+    # Put back the Waydroid settings install.sh changed.
+    for prop in multi_windows suspend; do
+      prev=$(state_get "prev_$prop")
+      [[ -n $prev ]] && waydroid prop set "persist.waydroid.$prop" "$prev" || true
+    done
   else
     warn "Android didn't start, so Kindle couldn't be removed from it."
+  fi
+  # Take our adb key out of the keys Android trusts.
+  if [[ -f $ADB_HOME/.android/adbkey.pub ]]; then
+    key=$(cut -d' ' -f1 "$ADB_HOME/.android/adbkey.pub")
+    sudo sed -i "\|^$key|d" "$WAYDROID_DATA/data/misc/adb/adb_keys" 2>/dev/null || true
   fi
   arm_layer=$(state_get arm_layer)
   if [[ -n $arm_layer && -x $APP_DIR/waydroid_script/venv/bin/python3 ]]; then
@@ -71,6 +84,7 @@ else
   pkgs=()
   [[ -n $(state_get waydroid_installed_by_us) ]] && pkgs+=(waydroid)
   [[ -n $(state_get cage_installed_by_us) ]] && pkgs+=(cage)
+  [[ -n $(state_get scrcpy_installed_by_us) ]] && pkgs+=(scrcpy)
   remove_pkgs "${pkgs[@]}"
   if [[ -n $(state_get apt_repo_added) ]]; then
     sudo rm -f /etc/apt/sources.list.d/waydroid.list /usr/share/keyrings/waydroid.gpg
