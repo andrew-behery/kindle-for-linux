@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Open Kindle in its own window.
 #   kindle           open Kindle (the first open after login starts Android in the background)
-#   kindle --sign-in sign in to Amazon (needed once; Kindle's usual window can't show that page)
+#   kindle --sign-in open Kindle at Amazon's sign-in page (opening Kindle does this by itself
+#                    until you're signed in)
 #   kindle --stop    shut Android down and free its memory
 #   kindle --status  show whether Android is running, paused or stopped
 # The window is scrcpy showing a virtual Android screen that resizes with it, so Kindle reflows
@@ -12,22 +13,119 @@ here=$(dirname "$(readlink -f "$0")")
 # shellcheck source=lib.sh
 source "$here/lib.sh"
 
-notify() { if command -v notify-send >/dev/null; then notify-send -a Kindle "$@" || true; fi; }
-fail() {
-  notify -u critical Kindle "$*"
+# Desktop notifications: notify TITLE [BODY], with Kindle's icon.
+notify() {
+  command -v notify-send >/dev/null || return 0
+  local icon=()
+  [[ ! -f $KINDLE_ICON ]] || icon=(-i "$KINDLE_ICON")
+  notify-send -a Kindle "${icon[@]}" "$@" || true
+}
+fail() { # TITLE [BODY]
+  notify -u critical "$@"
   die "$*"
 }
+# For messages: the command as installed, and the state folder as people would type it.
+CMD=$(state_get command)
+CMD=${CMD:-kindle}
+STATE_DISPLAY=${STATE_DIR/#$HOME/\~}
 
 if [[ $BACKEND == emulator ]]; then
-  [[ -x $EMU_SDK/emulator/emulator ]] || fail "The Android emulator isn't installed. Run install.sh again."
+  [[ -x $EMU_SDK/emulator/emulator ]] || fail "Kindle isn't fully installed." "The Android emulator is missing. Run install.sh again."
 else
-  command -v waydroid >/dev/null || fail "Waydroid isn't installed. Run install.sh again."
+  command -v waydroid >/dev/null || fail "Kindle isn't fully installed." "Waydroid is missing. Run install.sh again."
 fi
-[[ -n $(scrcpy_bin) && -n $(adb_bin) ]] || fail "scrcpy isn't installed. Run install.sh again."
+[[ -n $(scrcpy_bin) && -n $(adb_bin) ]] || fail "Kindle isn't fully installed." "scrcpy is missing. Run install.sh again."
 
-open_kindle() {
+# Amazon's sign-in page is marked secure (FLAG_SECURE), and Android blanks such windows out of
+# screen captures, which is what Kindle's window shows. A patched scrcpy server
+# (scrcpy-server/secure-display.patch) makes the virtual screen secure, so the page shows in
+# Kindle's own window. That takes Android's system user (root through adb: the emulator's image
+# allows it, and Waydroid once the installer has turned on debugging), and as the system user
+# Android doesn't share its clipboard; so this "sign-in mode" is used only until you're signed in,
+# with paste typed in as keystrokes (--legacy-paste). Then Kindle reopens in normal mode.
+SECURE_SERVER=$SCRCPY_DIR/scrcpy-server-secure
+
+# Get root inside Android (adb root) and print the serial to use from then on.
+android_root() { # $1 = serial
+  local s=$1
+  if [[ $(kfl_adb -s "$s" shell id -u 2>/dev/null | tr -d '\r') == 0 ]]; then
+    echo "$s"
+    return 0
+  fi
+  [[ $(kfl_adb -s "$s" shell getprop ro.debuggable 2>/dev/null | tr -d '\r') == 1 ]] || return 1
+  kfl_adb -s "$s" root >/dev/null 2>&1 || return 1
+  sleep 2
+  s=$(android_connect 30) || return 1
+  [[ $(kfl_adb -s "$s" shell id -u 2>/dev/null | tr -d '\r') == 0 ]] || return 1
+  echo "$s"
+}
+
+# Get Kindle to Amazon's sign-in page on Android's own (never shown) screen, where its controls
+# can be found by their text; Kindle's window then brings it over. 0 = on the page, 1 = no "Sign
+# In with Amazon" anywhere (already signed in), 2 = sign-in mode isn't possible here.
+# Sets `serial` to the root connection and `sign_in_size` to the window screen's size.
+#
+# Android recreates a screen whose size or density changes, and a sign-in screen recreated midway
+# fails: Amazon then rejects the device registration ("InvalidValue"). So the page is opened at
+# exactly the size and density of the screen in Kindle's window, which stays that size until
+# you're signed in (the window scales it), and moves over unchanged.
+prepare_sign_in() { # $1 = density
+  [[ -f $SECURE_SERVER && $(scrcpy_bin) == "$SCRCPY_DIR/scrcpy" ]] || return 2
+  serial=$(android_root "$serial") || return 2
+  local launch rc=0
+  sign_in_size="$((900 * $1 / 160))x$((1100 * $1 / 160))"
+  kfl_adb -s "$serial" shell am force-stop "$KINDLE_PKG" >/dev/null 2>&1 || true
+  kfl_adb -s "$serial" shell wm size "$sign_in_size" >/dev/null 2>&1 || true
+  kfl_adb -s "$serial" shell wm density "$1" >/dev/null 2>&1 || true
+  kfl_adb -s "$serial" logcat -c >/dev/null 2>&1 || true # watch_sign_in reads what follows
+  launch=$(kfl_adb -s "$serial" shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER "$KINDLE_PKG" | tr -d '\r' | tail -n1)
+  kfl_adb -s "$serial" shell am start --display 0 -n "$launch" >/dev/null 2>&1 || true
+  open_sign_in_page "$serial" || rc=1
+  return $rc
+}
+
+# Android's own screen back to how it's kept outside sign-in.
+restore_main_screen() {
+  if [[ $BACKEND == emulator ]]; then
+    kfl_adb -s "$serial" shell wm size 160x100 >/dev/null 2>&1 || true
+  else
+    kfl_adb -s "$serial" shell wm size reset >/dev/null 2>&1 || true
+  fi
+  kfl_adb -s "$serial" shell wm density reset >/dev/null 2>&1 || true
+}
+
+# Watch a sign-in in Kindle's window. Once Amazon's page has gone and Kindle is back in front,
+# Kindle registers this device with Amazon; its log says if that failed. Then close the window
+# (scrcpy, $1) so Kindle reopens: in normal mode if signed in, else at the sign-in page again.
+watch_sign_in() { # $1 = scrcpy pid
+  local top seen=0 i
+  while kill -0 "$1" 2>/dev/null; do
+    top=$(kfl_adb -s "$serial" shell dumpsys activity activities 2>/dev/null | grep -m1 topResumedActivity || true)
+    if [[ $top == *AuthPortalUIActivity* ]]; then
+      seen=1
+    elif ((seen)) && [[ $top == *"$KINDLE_PKG/"* ]]; then
+      for i in 1 2 3 4 5 6; do # the registration takes a moment
+        if kfl_adb -s "$serial" logcat -d 2>/dev/null | grep -q "AccountManagerLogic: Register error"; then
+          echo sign-in >"$STATE_DIR/reopen"
+          kill "$1" 2>/dev/null
+          return
+        fi
+        sleep 1
+      done
+      kfl_adb -s "$serial" shell sync >/dev/null 2>&1 || true
+      state_set "signed_in_$BACKEND" 1
+      echo normal >"$STATE_DIR/reopen"
+      kill "$1" 2>/dev/null
+      return
+    fi
+    sleep 2
+  done
+}
+
+open_kindle() { # $1 = auto (sign in first if Kindle isn't signed in yet) or sign-in
   mkdir -p "$STATE_DIR"
-  local log=$STATE_DIR/window.log serial rc=0 density scale="" big=()
+  local log=$STATE_DIR/window.log rc=0 density scale="" big=() mode=normal
+  serial="" sign_in_size=""
   # One Kindle window at a time: a second one would open a second virtual screen. Waiting a few
   # seconds lets a window that is just closing finish (it pauses Android on its way out).
   exec 9>"$STATE_DIR/window.lock"
@@ -35,20 +133,22 @@ open_kindle() {
 
   case $(android_state) in
     STOPPED)
-      notify Kindle "Starting Android…"
-      start_android 240 || fail "Android didn't start within 4 minutes. Details: $STATE_DIR/"
+      notify "Starting Kindle…" "The first time after you log in, this takes about half a minute."
+      start_android 240 || fail "Kindle couldn't start Android." "Details are in $STATE_DISPLAY."
       ;;
     FROZEN) android_wake ;;
   esac
   if ! serial=$(android_connect 15); then
     # Android is up but unreachable: after its core restarts (a crash), Waydroid's Android can
     # come back without its network. A fresh start fixes that.
-    notify Kindle "Restarting Android…"
+    notify "Restarting Kindle…" "Android stopped responding, so Kindle is starting it again."
     stop_android
-    start_android 240 || fail "Android didn't restart. Details: $STATE_DIR/"
-    serial=$(android_connect 60) || fail "Can't reach Android. Try: kindle --stop, then open Kindle again."
+    start_android 240 || fail "Kindle couldn't restart Android." "Details are in $STATE_DISPLAY."
+    serial=$(android_connect 60) || fail "Kindle can't reach Android." "Run \"$CMD --stop\", then open Kindle again."
   fi
   hide_waydroid_entry
+  # Light or dark like the desktop (also followed live while the window is open, below).
+  match_color_scheme "$serial"
 
   # Kindle's screen density: Android's standard 160 × the display's scale factor, so one Android
   # dp is one desktop pixel. (Kindle switches to its phone layout when the window is under 600 dp
@@ -69,29 +169,79 @@ open_kindle() {
   # Sized in real pixels, so on a scaled display Android draws at full resolution (sharp text).
   [[ -z $scale ]] || big=(SDL_VIDEO_WAYLAND_SCALE_TO_DISPLAY=1)
 
-  # Light or dark like the desktop, now and whenever the desktop switches while Kindle is open.
-  match_color_scheme "$serial"
-  follow_color_scheme "$serial" 9>&- &
+  if [[ $1 == sign-in || $(state_get "signed_in_$BACKEND") != 1 ]]; then
+    local prep=0
+    notify "Opening Amazon's sign-in page…"
+    prepare_sign_in "$density" || prep=$?
+    case $prep in
+      0) mode=sign-in ;;
+      1)
+        state_set "signed_in_$BACKEND" 1 # nothing to sign in to: already signed in
+        restore_main_screen
+        [[ $1 != sign-in ]] || notify "You're already signed in to Amazon."
+        ;;
+      2)
+        # No secure screen possible here (no root, or the distro's scrcpy): sign in in a window
+        # showing Android's own screen instead.
+        exec 9>&-
+        sign_in_window
+        return
+        ;;
+    esac
+  fi
 
+  follow_color_scheme "$serial" 9>&- &
   # Once the window closes: stop following (the PID is filled in now; the trap runs after this
   # function has returned), and pause Android. The pause lets scrcpy finish removing its screen.
   # shellcheck disable=SC2064
   trap "pkill -P $! 2>/dev/null; kill $! 2>/dev/null; sleep 2; android_sleep" EXIT
 
-  local server=() extra=()
-  [[ -f $SCRCPY_DIR/scrcpy-server ]] && server=(SCRCPY_SERVER_PATH="$SCRCPY_DIR/scrcpy-server")
-  # The emulator's Android 15 would reserve a strip for its navigation bar on Kindle's screen.
-  # Kindle has its own back buttons (and right-click is Back).
-  [[ $BACKEND != emulator ]] || extra=(--no-vd-system-decorations)
-  # stdbuf: scrcpy writes its log line by line (to a file it would hold lines back until exit).
-  # No hover events or mipmaps: Kindle has no use for the one, and the picture is never scaled
-  # down, so the other is wasted work.
-  env ADB="$(adb_bin)" "${server[@]}" SDL_APP_ID="$WINDOW_ID" SCRCPY_ICON_PATH="$KINDLE_ICON" "${big[@]}" \
-    stdbuf -oL -eL "$(scrcpy_bin)" --serial="$serial" --new-display=/"$density" --flex-display \
-    --start-app="$KINDLE_PKG" --window-title=Kindle --no-audio --no-mouse-hover --no-mipmaps "${extra[@]}" \
-    >"$log" 2>&1 </dev/null 9>&- || rc=$?
+  local server=() extra=() screen pid reopen
+  while :; do
+    server=() extra=()
+    rm -f "$STATE_DIR/reopen"
+    if [[ $mode == sign-in ]]; then
+      server=(SCRCPY_SERVER_PATH="$SECURE_SERVER")
+      # A fixed-size screen (see prepare_sign_in). Ctrl+V types the computer's clipboard: Android
+      # won't share its clipboard with the system user, and Ctrl+V is only intercepted with
+      # clipboard sync on (otherwise it reaches Android as is).
+      screen=(--new-display="$sign_in_size/$density")
+      extra=(--legacy-paste)
+      notify "Sign in to Amazon" "Once you're signed in, Kindle opens your library."
+    else
+      [[ ! -f $SCRCPY_DIR/scrcpy-server ]] || server=(SCRCPY_SERVER_PATH="$SCRCPY_DIR/scrcpy-server")
+      screen=(--new-display=/"$density" --flex-display)
+    fi
+    # The emulator's Android 15 would reserve a strip for its navigation bar on Kindle's screen.
+    # Kindle has its own back buttons (and right-click is Back).
+    [[ $BACKEND != emulator ]] || extra+=(--no-vd-system-decorations)
+    # stdbuf: scrcpy writes its log line by line (to a file it would hold lines back until exit).
+    # No hover events or mipmaps: Kindle has no use for the one, and the picture is never scaled
+    # down, so the other is wasted work.
+    env ADB="$(adb_bin)" "${server[@]}" SDL_APP_ID="$WINDOW_ID" SCRCPY_ICON_PATH="$KINDLE_ICON" "${big[@]}" \
+      stdbuf -oL -eL "$(scrcpy_bin)" --serial="$serial" "${screen[@]}" \
+      --start-app="$KINDLE_PKG" --window-title=Kindle --no-audio --no-mouse-hover --no-mipmaps "${extra[@]}" \
+      >"$log" 2>&1 </dev/null 9>&- &
+    pid=$!
+    [[ $mode != sign-in ]] || watch_sign_in "$pid" 9>&- &
+    rc=0
+    wait "$pid" || rc=$?
+    reopen=$(cat "$STATE_DIR/reopen" 2>/dev/null || true)
+    if [[ $reopen == normal ]]; then
+      restore_main_screen
+      mode=normal
+      notify "Signed in" "Opening your library…"
+      continue
+    elif [[ $reopen == sign-in ]]; then
+      notify "Amazon didn't finish signing you in" "The sign-in page opens again. Please try once more."
+      prepare_sign_in "$density" || true
+      continue
+    fi
+    break
+  done
+  [[ $mode != sign-in ]] || restore_main_screen # closed before signing in
   # 0 = window closed. Anything else means Android dropped the connection or scrcpy failed.
-  ((rc == 0)) || fail "Kindle's window closed unexpectedly. Details: $log"
+  ((rc == 0)) || fail "Kindle's window closed unexpectedly." "Details are in ${log/#$HOME/\~}."
 }
 
 # Take Kindle to Amazon's sign-in page: its "More" tab, then "Sign In with Amazon". They're found
@@ -99,7 +249,7 @@ open_kindle() {
 # screen's size and layout. 1 if they don't turn up (e.g. already signed in).
 open_sign_in_page() { # $1 = serial
   local i found
-  for i in $(seq 1 20); do
+  for i in $(seq 1 12); do
     if kfl_adb -s "$1" shell dumpsys activity activities 2>/dev/null | grep -m1 topResumedActivity | grep -q AuthPortalUIActivity; then
       return 0
     fi
@@ -131,33 +281,34 @@ for name, want in (("signin", lambda l: l.startswith("sign in with amazon")), ("
 # Amazon's sign-in page is marked secure (FLAG_SECURE): Android blanks such windows out of screen
 # captures, and Kindle's usual window is one (scrcpy). So signing in happens in a window that
 # shows Android's own screen directly: the emulator's own window, or Waydroid's full interface.
-sign_in() {
+# Fallback when Kindle's window can't show the sign-in page (see above).
+sign_in_window() {
   mkdir -p "$STATE_DIR"
   local serial launch
   exec 9>"$STATE_DIR/window.lock"
-  flock -w 5 9 || fail "Close Kindle's window first, then sign in."
-  notify Kindle "Opening Android to sign in…"
+  flock -w 5 9 || fail "Kindle is already open." "Close its window first, then sign in."
+  notify "Opening Amazon's sign-in page…" "It opens in a separate window."
   if [[ $BACKEND == emulator ]]; then
     if ! emu_windowed; then
       stop_android
-      EMU_WINDOW=1 start_android 240 || fail "Android didn't start. Details: $STATE_DIR/emulator.log"
+      EMU_WINDOW=1 start_android 240 || fail "Kindle couldn't start Android." "Details are in $STATE_DISPLAY."
     fi
   else
     case $(android_state) in
-      STOPPED) start_android 240 || fail "Android didn't start. Details: $STATE_DIR/session.log" ;;
+      STOPPED) start_android 240 || fail "Kindle couldn't start Android." "Details are in $STATE_DISPLAY." ;;
       FROZEN) android_wake ;;
     esac
     setsid -f waydroid show-full-ui >/dev/null 2>&1 </dev/null 9>&-
   fi
-  serial=$(android_connect 60) || fail "Can't reach Android. Try: kindle --stop, then kindle --sign-in."
+  serial=$(android_connect 60) || fail "Kindle can't reach Android." "Run \"$CMD --stop\", then \"$CMD --sign-in\"."
   match_color_scheme "$serial"
   launch=$(kfl_adb -s "$serial" shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER "$KINDLE_PKG" | tr -d '\r' | tail -n1)
   kfl_adb -s "$serial" shell am start -n "$launch" >/dev/null 2>&1 || true
   if open_sign_in_page "$serial"; then
-    notify -t 0 Kindle "Sign in to Amazon in this window. Kindle switches to its usual window once you're signed in."
+    notify "Sign in to Amazon" "In the window that just opened. Once you're signed in, it closes and Kindle opens your library."
     echo "Sign in to Amazon in the Android window."
   else
-    notify -t 0 Kindle "In this window, open More, then Sign In with Amazon (if you're already signed in, just close it)."
+    notify "Sign in to Amazon" "In the window that just opened, open More, then Sign In with Amazon. Already signed in? Just close that window."
     echo "Sign in to Amazon in the Android window (More → Sign In with Amazon)."
   fi
   # Wait for the sign-in: Amazon's page (AuthPortalUIActivity) comes up, and once it's gone again
@@ -171,7 +322,8 @@ sign_in() {
       seen=1
     elif ((seen)) && [[ $top == *"$KINDLE_PKG/"* ]]; then
       kfl_adb -s "$serial" shell sync >/dev/null 2>&1 || true
-      notify Kindle "Signed in. Opening Kindle…"
+      state_set "signed_in_$BACKEND" 1
+      notify "Signed in" "Opening your library…"
       break
     fi
     sleep 2
@@ -179,7 +331,7 @@ sign_in() {
   if [[ $BACKEND == emulator ]]; then
     stop_android # its window closes; Kindle's usual window starts it again without one
   else
-    notify Kindle "You can close the Android window now."
+    notify "Signed in" "You can close the Android window now."
   fi
   exec 9>&-
   setsid -f "$here/kindle" >/dev/null 2>&1 </dev/null
@@ -188,7 +340,7 @@ sign_in() {
 case ${1:-} in
   --sign-in)
     [[ $(display_mode) != none ]] || die "Run this from inside your desktop session."
-    sign_in
+    open_kindle sign-in
     ;;
   --stop)
     stop_android
@@ -200,9 +352,9 @@ case ${1:-} in
   "")
     [[ $(display_mode) != none ]] || die "Run this from inside your desktop session."
     if [[ $BACKEND == waydroid && $(display_mode) == x11 ]]; then
-      command -v cage >/dev/null || fail "cage is needed on X11 desktops. Run install.sh again."
+      command -v cage >/dev/null || fail "Kindle isn't fully installed." "cage, needed on X11 desktops, is missing. Run install.sh again."
     fi
-    open_kindle
+    open_kindle auto
     ;;
   *) die "unknown option: $1 (try --sign-in, --stop or --status)" ;;
 esac

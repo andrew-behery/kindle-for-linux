@@ -53,11 +53,18 @@ to rerun. **No Google account, no Play Store.** It:
 Downloads are checksum-verified. Google's emulator and image come under the
 [Android SDK License](https://developer.android.com/studio/terms).
 
-**All you do by hand is sign in.** Amazon marks its sign-in page as secure, which keeps it out of
-Kindle's usual window (Android blanks secure pages out of screen captures, and that window is
-one), so the installer opens Android's own screen for it: In Kindle, open **More → Sign In with
-Amazon**. Once you're signed in, Kindle switches to its usual window by itself. To sign in again
+**All you do by hand is sign in.** Kindle opens at Amazon's sign-in page; once you're signed in, it
+reopens with your library. Ctrl+V pastes there (from a password manager, say). To sign in again
 later, use the menu entry's **Sign in to Amazon** action or `kindle --sign-in`.
+
+Amazon marks its sign-in page as secure, and Android blanks secure pages out of screen captures,
+which is what Kindle's window shows. So for signing in, Kindle's window uses scrcpy's own server
+with one change ([`scrcpy-server/secure-display.patch`](scrcpy-server/secure-display.patch), built
+from scrcpy's tagged source by [`scrcpy-server/build.sh`](scrcpy-server/build.sh)): started as root
+inside Android, it runs as Android's system user and marks its screen secure. (On Waydroid the
+installer turns on Android's debugging mode for that; adb only answers this computer, with its
+own key.) The system user can't use Android's clipboard, so this is only used until you're signed
+in. Where it isn't possible, signing in happens in a separate window showing Android's own screen.
 
 Already have the Kindle APK? `./install.sh --apk kindle.apk` uses it instead (same checks).
 
@@ -114,7 +121,7 @@ and everything in it go, along with any firewall rules and the apt repository th
 
 | | |
 |---|---|
-| `~/.local/share/kindle-for-linux/` | the launcher, scrcpy and its adb (`scrcpy/`), the adb key (`adb/`), Kindle's icon; on the emulator also the emulator and its image (`sdk/`) and Android's data (`avd/`); on Waydroid the ARM translation installer ([waydroid_script](https://github.com/casualsnek/waydroid_script), pinned and checksummed) |
+| `~/.local/share/kindle-for-linux/` | the launcher, scrcpy and its adb plus the patched server (`scrcpy/`), the adb key (`adb/`), Kindle's icon; on the emulator also the emulator and its image (`sdk/`) and Android's data (`avd/`); on Waydroid the ARM translation installer ([waydroid_script](https://github.com/casualsnek/waydroid_script), pinned and checksummed) |
 | `~/.local/state/kindle-for-linux/` | `install.log`, `session.log` / `emulator.log`, `window.log`, and what was installed (for uninstall) |
 | `/etc/waydroid-extra/images/` | Waydroid: the pinned Android images |
 | `/var/lib/waydroid/`, `~/.local/share/waydroid/` | Waydroid: its settings and Android's data |

@@ -67,6 +67,8 @@ if [[ -x $APP_DIR/kindle && -f $DESKTOP_FILE ]]; then ok "launcher and menu entr
 if [[ -f $KINDLE_ICON ]]; then ok "icon: $KINDLE_ICON"; else bad "no icon for Kindle"; fi
 if [[ -n $(scrcpy_bin) ]]; then ok "$("$(scrcpy_bin)" --version 2>/dev/null | head -n1 | cut -d' ' -f1-2) ($(scrcpy_bin))"; else bad "scrcpy missing (Kindle's window)"; fi
 if [[ $BACKEND == emulator || -f $ADB_HOME/.android/adbkey ]]; then ok "adb key for Android in $ADB_HOME"; else bad "no adb key (rerun install.sh)"; fi
+if [[ -f $SCRCPY_DIR/scrcpy-server-secure ]]; then ok "patched scrcpy server for signing in inside Kindle's window"; else info "no patched scrcpy server: signing in uses a separate window"; fi
+if [[ $(state_get "signed_in_$BACKEND") == 1 ]]; then ok "signed in to Amazon"; else info "not signed in yet: opening Kindle shows Amazon's sign-in page"; fi
 
 say "Android"
 state=$(android_state)

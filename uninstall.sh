@@ -62,6 +62,21 @@ elif [[ $preexisting == 1 ]]; then
       prev=$(state_get "prev_$prop")
       [[ -n $prev ]] && waydroid prop set "persist.waydroid.$prop" "$prev" || true
     done
+    # ...and Android's debugging mode, turned on for the sign-in window.
+    if [[ -n $(state_get debuggable_set_by_us) ]]; then
+      sudo python3 - "$WAYDROID_CFG" <<'PYCFG'
+import configparser, sys
+cfg = configparser.ConfigParser()
+cfg.optionxform = str
+cfg.read(sys.argv[1])
+for key in ("ro.debuggable", "lineage.service.adb.root"):
+    cfg.remove_option("properties", key) if cfg.has_section("properties") else None
+with open(sys.argv[1], "w") as f:
+    cfg.write(f)
+PYCFG
+      stop_android
+      sudo waydroid upgrade --offline >/dev/null 2>&1 || true
+    fi
   else
     warn "Android didn't start, so Kindle couldn't be removed from it."
   fi

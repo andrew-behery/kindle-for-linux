@@ -1,0 +1,75 @@
+diff --git i/server/src/main/java/com/genymobile/scrcpy/FakeContext.java w/server/src/main/java/com/genymobile/scrcpy/FakeContext.java
+index 5d41a8f..9d73a7a 100644
+--- i/server/src/main/java/com/genymobile/scrcpy/FakeContext.java
++++ w/server/src/main/java/com/genymobile/scrcpy/FakeContext.java
+@@ -16,8 +16,12 @@ import java.lang.reflect.Field;
+ 
+ public final class FakeContext extends ContextWrapper {
+ 
+-    public static final String PACKAGE_NAME = "com.android.shell";
+     public static final int ROOT_UID = 0; // Like android.os.Process.ROOT_UID, but before API 29
++    public static final int SYSTEM_UID = 1000; // android.os.Process.SYSTEM_UID
++    // Kindle for Linux: started as root, the server runs as Android's system user (see
++    // Server.dropRootPrivileges), whose package is "android".
++    public static final boolean AS_SYSTEM = Process.myUid() == SYSTEM_UID;
++    public static final String PACKAGE_NAME = AS_SYSTEM ? "android" : "com.android.shell";
+ 
+     private static final FakeContext INSTANCE = new FakeContext();
+ 
+@@ -74,7 +78,7 @@ public final class FakeContext extends ContextWrapper {
+     @TargetApi(AndroidVersions.API_31_ANDROID_12)
+     @Override
+     public AttributionSource getAttributionSource() {
+-        AttributionSource.Builder builder = new AttributionSource.Builder(Process.SHELL_UID);
++        AttributionSource.Builder builder = new AttributionSource.Builder(AS_SYSTEM ? SYSTEM_UID : Process.SHELL_UID);
+         builder.setPackageName(PACKAGE_NAME);
+         return builder.build();
+     }
+diff --git i/server/src/main/java/com/genymobile/scrcpy/Server.java w/server/src/main/java/com/genymobile/scrcpy/Server.java
+index d7d1a76..5c6df70 100644
+--- i/server/src/main/java/com/genymobile/scrcpy/Server.java
++++ w/server/src/main/java/com/genymobile/scrcpy/Server.java
+@@ -282,7 +282,10 @@ public final class Server {
+             if (Os.getuid() == 0) {
+                 // Copy-paste does not work with root user
+                 // <https://github.com/Genymobile/scrcpy/issues/6224>
+-                Os.setuid(2000);
++                // Kindle for Linux: become Android's system user instead of the shell user. It may
++                // read the clipboard (as a system service) and create a secure virtual display
++                // (see NewDisplayCapture), which the shell user may not.
++                Os.setuid(FakeContext.SYSTEM_UID);
+             }
+         } catch (Exception e) {
+             Ln.w("Cannot set UID", e);
+diff --git i/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java w/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
+index 5ed4c73..0df2a36 100644
+--- i/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
++++ w/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
+@@ -1,6 +1,7 @@
+ package com.genymobile.scrcpy.video;
+ 
+ import com.genymobile.scrcpy.AndroidVersions;
++import com.genymobile.scrcpy.FakeContext;
+ import com.genymobile.scrcpy.Options;
+ import com.genymobile.scrcpy.control.PositionMapper;
+ import com.genymobile.scrcpy.display.DisplayInfo;
+@@ -31,6 +32,7 @@ public class NewDisplayCapture extends SurfaceCapture {
+     private static final int VIRTUAL_DISPLAY_FLAG_PUBLIC = android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC;
+     private static final int VIRTUAL_DISPLAY_FLAG_PRESENTATION = android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION;
+     private static final int VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY = android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY;
++    private static final int VIRTUAL_DISPLAY_FLAG_SECURE = android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_SECURE;
+     private static final int VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH = 1 << 6;
+     private static final int VIRTUAL_DISPLAY_FLAG_ROTATES_WITH_CONTENT = 1 << 7;
+     private static final int VIRTUAL_DISPLAY_FLAG_DESTROY_CONTENT_ON_REMOVAL = 1 << 8;
+@@ -221,6 +223,11 @@ public class NewDisplayCapture extends SurfaceCapture {
+             if (vdSystemDecorations) {
+                 flags |= VIRTUAL_DISPLAY_FLAG_SHOULD_SHOW_SYSTEM_DECORATIONS;
+             }
++            // Kindle for Linux: as Android's system user, make the display secure, so that windows
++            // marked FLAG_SECURE (such as Amazon's sign-in page) are shown instead of blanked out.
++            if (FakeContext.AS_SYSTEM) {
++                flags |= VIRTUAL_DISPLAY_FLAG_SECURE;
++            }
+             if (Build.VERSION.SDK_INT >= AndroidVersions.API_33_ANDROID_13) {
+                 flags |= VIRTUAL_DISPLAY_FLAG_TRUSTED
+                         | VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP

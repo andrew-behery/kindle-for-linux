@@ -462,6 +462,9 @@ if [[ $arch == x86_64 ]]; then
     echo "$SCRCPY_VERSION" >"$SCRCPY_DIR/kindle-for-linux.version"
     rm -f "$tarball"
   fi
+  # The same scrcpy server, patched to show Amazon's sign-in page in Kindle's window (see
+  # scrcpy-server/build.sh). It only pairs with this exact scrcpy version.
+  install -m 644 "$here/scrcpy-server/scrcpy-server-secure" "$SCRCPY_DIR/scrcpy-server-secure"
 else
   v=$(scrcpy --version 2>/dev/null | awk 'NR == 1 { print $2 }')
   [[ -n $v && $(printf '%s\n' 4.1 "$v" | sort -V | head -n1) == 4.1 ]] ||
@@ -516,6 +519,12 @@ if [[ $BACKEND == emulator ]]; then
   # even in a narrow tile.
   cores=$(nproc)
   ((cores <= 4)) || cores=4
+  # Earlier versions named the device kindle-for-linux: keep its Android data under the new name.
+  if [[ -d $EMU_AVD_HOME/kindle-for-linux.avd && ! -e $EMU_AVD_HOME/$EMU_AVD.avd ]]; then
+    stop_android
+    mv "$EMU_AVD_HOME/kindle-for-linux.avd" "$EMU_AVD_HOME/$EMU_AVD.avd"
+    rm -f "$EMU_AVD_HOME/kindle-for-linux.ini"
+  fi
   mkdir -p "$EMU_AVD_HOME/$EMU_AVD.avd"
   printf 'avd.ini.encoding=UTF-8\npath=%s\ntarget=android-35\n' "$EMU_AVD_HOME/$EMU_AVD.avd" >"$EMU_AVD_HOME/$EMU_AVD.ini"
   cat >"$EMU_AVD_HOME/$EMU_AVD.avd/config.ini" <<EOF
@@ -582,6 +591,28 @@ if [[ $BACKEND == waydroid ]]; then
   # when Kindle's window closes.
   if [[ $(waydroid prop get persist.waydroid.suspend) != false ]]; then
     waydroid prop set persist.waydroid.suspend false
+    changed=1
+  fi
+  # Android's debugging mode, so adb can run as root: Kindle's window needs that to show Amazon's
+  # sign-in page (see the kindle launcher). adb only answers this computer, and only our key.
+  # Waydroid reads overrides from the [properties] section of its config when it regenerates its
+  # property file (`waydroid upgrade --offline`).
+  if ! grep -Eq '^ro\.debuggable *= *1' "$WAYDROID_CFG"; then
+    root python3 - "$WAYDROID_CFG" <<'PYCFG'
+import configparser, sys
+cfg = configparser.ConfigParser()
+cfg.optionxform = str  # keep keys exactly as Waydroid wrote them
+cfg.read(sys.argv[1])
+if not cfg.has_section("properties"):
+    cfg.add_section("properties")
+cfg["properties"]["ro.debuggable"] = "1"
+cfg["properties"]["lineage.service.adb.root"] = "1"
+with open(sys.argv[1], "w") as f:
+    cfg.write(f)
+PYCFG
+    stop_android
+    root waydroid upgrade --offline >/dev/null 2>&1 || warn "Couldn't apply Android's debugging setting."
+    state_set debuggable_set_by_us 1
     changed=1
   fi
   if ((changed)); then
@@ -792,8 +823,9 @@ note "Open Kindle from your app menu (\"$entry_name\") or with: $cmd_name"
 if [[ -n ${fresh_kindle:-} ]]; then
   # Amazon's sign-in page can't show in Kindle's usual window (see `kindle --sign-in`), so the
   # first open is the sign-in window.
-  note "Now sign in: Android opens in a window of its own. In Kindle, open More, then Sign In with"
-  note "Amazon. Close that window when you're signed in, and Kindle opens in its usual window."
+  say "Last step: sign in to Amazon"
+  note "Kindle opens in a moment at Amazon's sign-in page. Once you're signed in, it reopens"
+  note "with your library."
   note "(To sign in again later: the menu entry's \"Sign in to Amazon\" action, or $cmd_name --sign-in.)"
   setsid -f "$APP_DIR/kindle" --sign-in >/dev/null 2>&1 </dev/null
 else

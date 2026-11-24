@@ -31,7 +31,7 @@ export ANDROID_ADB_SERVER_PORT=5039
 #             images have no ARM translation, and Kindle is ARM-only.
 EMU_SDK=$APP_DIR/sdk        # the emulator and its system image
 EMU_AVD_HOME=$APP_DIR/avd
-EMU_AVD=kindle-for-linux
+EMU_AVD=Kindle             # also the emulator window's title (seen when signing in)
 EMU_CONSOLE_PORT=5590       # adb on 5591: outside 5554-5585, where other emulators and adbs look
 EMU_SERIAL=emulator-$EMU_CONSOLE_PORT
 # ...so our adb server looks there too.
