@@ -39,13 +39,21 @@ fi
 # Amazon's sign-in page is marked secure (FLAG_SECURE), and Android blanks such windows out of
 # screen captures, which is what Kindle's window shows. A patched scrcpy server
 # (scrcpy-server/secure-display.patch) makes the virtual screen secure, so the page shows in
-# Kindle's own window. That takes Android's system user (root through adb: the emulator's image
-# allows it, and Waydroid once the installer has turned on debugging), and as the system user
-# Android doesn't share its clipboard; so this "sign-in mode" is used only until you're signed in,
-# with paste typed in as keystrokes (--legacy-paste). Then Kindle reopens in normal mode.
+# Kindle's own window. That takes Android's system user (on the emulator via `adb root`; on
+# Waydroid, where adbd refuses `adb root`, via an init service installed in Waydroid's overlay),
+# and as the system user Android doesn't share its clipboard; so this "sign-in mode" is used only
+# until you're signed in, with paste typed in as keystrokes (--legacy-paste). Then Kindle reopens
+# in normal mode.
 SECURE_SERVER=$SCRCPY_DIR/scrcpy-server-secure
+adb_system_bin() {
+  if [[ -x $here/adb-system ]]; then
+    echo "$here/adb-system"
+  elif [[ -x $here/scrcpy-server/adb-system ]]; then
+    echo "$here/scrcpy-server/adb-system"
+  fi
+}
 
-# Get root inside Android (adb root) and print the serial to use from then on.
+# Get root inside Android (adb root) and print the serial to use from then on (emulator backend).
 android_root() { # $1 = serial
   local s=$1
   if [[ $(kfl_adb -s "$s" shell id -u 2>/dev/null | tr -d '\r') == 0 ]]; then
@@ -63,7 +71,7 @@ android_root() { # $1 = serial
 # Get Kindle to Amazon's sign-in page on Android's own (never shown) screen, where its controls
 # can be found by their text; Kindle's window then brings it over. 0 = on the page, 1 = no "Sign
 # In with Amazon" anywhere (already signed in), 2 = sign-in mode isn't possible here.
-# Sets `serial` to the root connection and `sign_in_size` to the window screen's size.
+# Sets `serial` (elevated on the emulator) and `sign_in_size` to the window screen's size.
 #
 # Android recreates a screen whose size or density changes, and a sign-in screen recreated midway
 # fails: Amazon then rejects the device registration ("InvalidValue"). So the page is opened at
@@ -71,7 +79,14 @@ android_root() { # $1 = serial
 # you're signed in (the window scales it), and moves over unchanged.
 prepare_sign_in() { # $1 = density
   [[ -f $SECURE_SERVER && $(scrcpy_bin) == "$SCRCPY_DIR/scrcpy" ]] || return 2
-  serial=$(android_root "$serial") || return 2
+  if [[ $BACKEND == emulator ]]; then
+    serial=$(android_root "$serial") || return 2
+  else
+    [[ -n $(adb_system_bin) ]] || return 2
+    kfl_adb -s "$serial" shell \
+      'test -x /system/bin/kfl-scrcpy-server -a -f /system/etc/init/kfl-scrcpy.rc -a -f /system/framework/kfl-scrcpy-server.jar' \
+      >/dev/null 2>&1 || return 2
+  fi
   local launch rc=0
   sign_in_size="$((900 * $1 / 160))x$((1100 * $1 / 160))"
   kfl_adb -s "$serial" shell am force-stop "$KINDLE_PKG" >/dev/null 2>&1 || true
@@ -196,9 +211,9 @@ open_kindle() { # $1 = auto (sign in first if Kindle isn't signed in yet) or sig
   # shellcheck disable=SC2064
   trap "pkill -P $! 2>/dev/null; kill $! 2>/dev/null; sleep 2; android_sleep" EXIT
 
-  local server=() extra=() screen pid reopen
+  local server=() extra=() adb_env=() screen pid reopen
   while :; do
-    server=() extra=()
+    server=() extra=() adb_env=(ADB="$(adb_bin)")
     rm -f "$STATE_DIR/reopen"
     if [[ $mode == sign-in ]]; then
       server=(SCRCPY_SERVER_PATH="$SECURE_SERVER")
@@ -207,6 +222,10 @@ open_kindle() { # $1 = auto (sign in first if Kindle isn't signed in yet) or sig
       # clipboard sync on (otherwise it reaches Android as is).
       screen=(--new-display="$sign_in_size/$density")
       extra=(--legacy-paste)
+      if [[ $BACKEND == waydroid ]]; then
+        adb_env=(ADB="$(adb_system_bin)" REAL_ADB="$(adb_bin)")
+        extra+=(--no-cleanup)
+      fi
       notify "Sign in to Amazon" "Once you're signed in, Kindle opens your library."
     else
       [[ ! -f $SCRCPY_DIR/scrcpy-server ]] || server=(SCRCPY_SERVER_PATH="$SCRCPY_DIR/scrcpy-server")
@@ -218,7 +237,7 @@ open_kindle() { # $1 = auto (sign in first if Kindle isn't signed in yet) or sig
     # stdbuf: scrcpy writes its log line by line (to a file it would hold lines back until exit).
     # No hover events or mipmaps: Kindle has no use for the one, and the picture is never scaled
     # down, so the other is wasted work.
-    env ADB="$(adb_bin)" "${server[@]}" SDL_APP_ID="$WINDOW_ID" SCRCPY_ICON_PATH="$KINDLE_ICON" "${big[@]}" \
+    env "${adb_env[@]}" "${server[@]}" SDL_APP_ID="$WINDOW_ID" SCRCPY_ICON_PATH="$KINDLE_ICON" "${big[@]}" \
       stdbuf -oL -eL "$(scrcpy_bin)" --serial="$serial" "${screen[@]}" \
       --start-app="$KINDLE_PKG" --window-title=Kindle --no-audio --no-mouse-hover --no-mipmaps "${extra[@]}" \
       >"$log" 2>&1 </dev/null 9>&- &

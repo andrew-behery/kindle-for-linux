@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# ADB wrapper for Waydroid's sign-in mode (used only while signing in to Amazon).
+# Waydroid's adbd has `adb root` compiled out, so scrcpy can't elevate its server to Android's
+# system user over adb. Instead, install.sh places the pinned patched server in Waydroid's system
+# overlay as an init service (kfl_scrcpy, running as user system). This wrapper passes every other
+# adb call straight through to REAL_ADB and redirects scrcpy's server launch to that service.
+set -euo pipefail
+
+: "${REAL_ADB:?REAL_ADB must be set to the real adb binary}"
+
+# scrcpy pushes its server to /data/local/tmp/scrcpy-server.jar; the overlay already has it at
+# /system/framework/kfl-scrcpy-server.jar (read-only), so skip the push.
+if [[ ${1:-} == -s && ${3:-} == push && ${5:-} == /data/local/tmp/scrcpy-server.jar ]]; then
+  exit 0
+fi
+
+# Intercept only scrcpy's server launch; everything else goes straight to adb.
+if [[ ${1:-} == -s && ${3:-} == shell && ${4:-} == CLASSPATH=/data/local/tmp/scrcpy-server.jar && ${7:-} == com.genymobile.scrcpy.Server ]]; then
+  serial=$2
+  shift 7
+  args=("$@")
+  has_cleanup=0
+  for a in "${args[@]}"; do
+    [[ $a != cleanup=* ]] || has_cleanup=1
+  done
+  ((has_cleanup)) || args+=(cleanup=false)
+
+  child=""
+  cleanup() {
+    [[ -z $child ]] || kill "$child" 2>/dev/null || true
+    timeout 10 "$REAL_ADB" -s "$serial" shell \
+      'setprop debug.kfl.scrcpy 0; rm -f /data/local/tmp/kfl-scrcpy.args /data/local/tmp/kfl-scrcpy.log' \
+      >/dev/null 2>&1 || true
+  }
+  trap cleanup EXIT
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+
+  # Stop any previous instance and write the validated server arguments.
+  printf '%s\n' "${args[@]}" | "$REAL_ADB" -s "$serial" shell '
+    if [ "$(getprop debug.kfl.scrcpy)" = 1 ]; then
+      setprop debug.kfl.scrcpy 0
+      sleep 0.1
+    fi
+    i=0
+    while [ "$(getprop init.svc.kfl_scrcpy)" = running ] && [ "$i" -lt 20 ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    cat > /data/local/tmp/kfl-scrcpy.args && chmod 644 /data/local/tmp/kfl-scrcpy.args
+    : > /data/local/tmp/kfl-scrcpy.log && chmod 666 /data/local/tmp/kfl-scrcpy.log
+  '
+
+  # Start the system-uid service and stream its output until it exits.
+  "$REAL_ADB" -s "$serial" shell '
+    tpid=""
+    trap '\''[ -z "$tpid" ] || kill "$tpid" 2>/dev/null || true'\'' EXIT HUP INT TERM
+    tail -f /data/local/tmp/kfl-scrcpy.log &
+    tpid=$!
+    setprop debug.kfl.scrcpy 1
+    i=0
+    while [ "$i" -lt 30 ]; do
+      st=$(getprop init.svc.kfl_scrcpy)
+      [ "$st" = running ] && break
+      [ "$st" = stopped ] && [ -s /data/local/tmp/kfl-scrcpy.log ] && break
+      sleep 0.1
+      i=$((i + 1))
+    done
+    while [ "$(getprop init.svc.kfl_scrcpy)" = running ]; do
+      sleep 0.2
+    done
+    sleep 0.1
+  ' </dev/null &
+  child=$!
+  wait "$child" || true
+  exit 0
+fi
+
+exec "$REAL_ADB" "$@"

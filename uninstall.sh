@@ -62,7 +62,14 @@ elif [[ $preexisting == 1 ]]; then
       prev=$(state_get "prev_$prop")
       [[ -n $prev ]] && waydroid prop set "persist.waydroid.$prop" "$prev" || true
     done
-    # ...and Android's debugging mode, turned on for the sign-in window.
+    # ...and the sign-in overlay service (plus any legacy debugging properties from earlier installs).
+    if [[ -n $(state_get waydroid_signin_service) ]]; then
+      stop_android
+      sudo rm -f /var/lib/waydroid/overlay/system/framework/kfl-scrcpy-server.jar \
+        /var/lib/waydroid/overlay/system/bin/kfl-scrcpy-server \
+        /var/lib/waydroid/overlay/system/etc/init/kfl-scrcpy.rc
+      sudo rmdir /var/lib/waydroid/overlay/system/framework 2>/dev/null || true
+    fi
     if [[ -n $(state_get debuggable_set_by_us) ]]; then
       sudo python3 - "$WAYDROID_CFG" <<'PYCFG'
 import configparser, sys

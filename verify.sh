@@ -63,11 +63,21 @@ else
     bad "virtual device missing (rerun install.sh)"
   fi
 fi
-if [[ -x $APP_DIR/kindle && -f $DESKTOP_FILE ]]; then ok "launcher and menu entry installed ($(sed -n 's/^Name=//p' "$DESKTOP_FILE"))"; else bad "launcher or menu entry missing"; fi
+if [[ -x $APP_DIR/kindle && -f $DESKTOP_FILE ]]; then ok "launcher and menu entry installed ($(sed -n 's/^Name=//p' "$DESKTOP_FILE" | head -n1))"; else bad "launcher or menu entry missing"; fi
 if [[ -f $KINDLE_ICON ]]; then ok "icon: $KINDLE_ICON"; else bad "no icon for Kindle"; fi
 if [[ -n $(scrcpy_bin) ]]; then ok "$("$(scrcpy_bin)" --version 2>/dev/null | head -n1 | cut -d' ' -f1-2) ($(scrcpy_bin))"; else bad "scrcpy missing (Kindle's window)"; fi
 if [[ $BACKEND == emulator || -f $ADB_HOME/.android/adbkey ]]; then ok "adb key for Android in $ADB_HOME"; else bad "no adb key (rerun install.sh)"; fi
-if [[ -f $SCRCPY_DIR/scrcpy-server-secure ]]; then ok "patched scrcpy server for signing in inside Kindle's window"; else info "no patched scrcpy server: signing in uses a separate window"; fi
+if [[ $BACKEND == waydroid ]]; then
+  if [[ -f $SCRCPY_DIR/scrcpy-server-secure && -f /var/lib/waydroid/overlay/system/etc/init/kfl-scrcpy.rc && -x $APP_DIR/adb-system ]]; then
+    ok "sign-in service in Waydroid's overlay (Amazon sign-in shows in Kindle's window)"
+  else
+    info "no sign-in overlay service: signing in uses a separate window"
+  fi
+elif [[ -f $SCRCPY_DIR/scrcpy-server-secure ]]; then
+  ok "patched scrcpy server for signing in inside Kindle's window"
+else
+  info "no patched scrcpy server: signing in uses a separate window"
+fi
 if [[ $(state_get "signed_in_$BACKEND") == 1 ]]; then ok "signed in to Amazon"; else info "not signed in yet: opening Kindle shows Amazon's sign-in page"; fi
 
 say "Android"

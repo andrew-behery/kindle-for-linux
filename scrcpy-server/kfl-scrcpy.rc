@@ -1,0 +1,11 @@
+service kfl_scrcpy /system/bin/kfl-scrcpy-server
+    user system
+    group system graphics input inet log readproc drmrpc
+    disabled
+    oneshot
+
+on property:debug.kfl.scrcpy=1
+    start kfl_scrcpy
+
+on property:debug.kfl.scrcpy=0
+    stop kfl_scrcpy

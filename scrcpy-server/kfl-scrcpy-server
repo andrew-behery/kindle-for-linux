@@ -1,0 +1,19 @@
+#!/system/bin/sh
+# Started by Android's init (kfl-scrcpy.rc) as user system (uid 1000) during Amazon sign-in on
+# Waydroid. Runs only the pinned patched scrcpy server from /system/framework with validated flags.
+args=/data/local/tmp/kfl-scrcpy.args
+log=/data/local/tmp/kfl-scrcpy.log
+[ -r "$args" ] || exit 1
+set --
+while IFS= read -r a; do
+  case $a in
+    ""|*[!A-Za-z0-9_.,/:+=-]*) exit 2 ;;
+  esac
+  set -- "$@" "$a"
+done < "$args"
+[ "$#" -ge 1 ] || exit 1
+export CLASSPATH=/system/framework/kfl-scrcpy-server.jar
+if [ -w "$log" ]; then
+  exec /system/bin/app_process / com.genymobile.scrcpy.Server "$@" >>"$log" 2>&1
+fi
+exec /system/bin/app_process / com.genymobile.scrcpy.Server "$@"

@@ -593,27 +593,40 @@ if [[ $BACKEND == waydroid ]]; then
     waydroid prop set persist.waydroid.suspend false
     changed=1
   fi
-  # Android's debugging mode, so adb can run as root: Kindle's window needs that to show Amazon's
-  # sign-in page (see the kindle launcher). adb only answers this computer, and only our key.
-  # Waydroid reads overrides from the [properties] section of its config when it regenerates its
-  # property file (`waydroid upgrade --offline`).
-  if ! grep -Eq '^ro\.debuggable *= *1' "$WAYDROID_CFG"; then
+  # Clean up properties an earlier version wrote to waydroid.cfg (Waydroid's adbd has `adb root`
+  # compiled out, so they aren't needed; sign-in uses the overlay service below instead).
+  if [[ -n $(state_get debuggable_set_by_us) ]]; then
     root python3 - "$WAYDROID_CFG" <<'PYCFG'
 import configparser, sys
 cfg = configparser.ConfigParser()
-cfg.optionxform = str  # keep keys exactly as Waydroid wrote them
+cfg.optionxform = str
 cfg.read(sys.argv[1])
-if not cfg.has_section("properties"):
-    cfg.add_section("properties")
-cfg["properties"]["ro.debuggable"] = "1"
-cfg["properties"]["lineage.service.adb.root"] = "1"
+if cfg.has_section("properties"):
+    for key in ("ro.debuggable", "lineage.service.adb.root"):
+        cfg.remove_option("properties", key)
 with open(sys.argv[1], "w") as f:
     cfg.write(f)
 PYCFG
     stop_android
-    root waydroid upgrade --offline >/dev/null 2>&1 || warn "Couldn't apply Android's debugging setting."
-    state_set debuggable_set_by_us 1
+    root waydroid upgrade --offline >/dev/null 2>&1 || true
+    state_set debuggable_set_by_us ""
     changed=1
+  fi
+  # Sign-in inside Kindle's window needs the patched scrcpy server to run as Android's system user
+  # (uid 1000) so it can create a secure virtual screen. Waydroid's adbd refuses `adb root`, so
+  # place the pinned server in Waydroid's system overlay as an init service started only on demand.
+  if [[ -f $SCRCPY_DIR/scrcpy-server-secure ]]; then
+    overlay=/var/lib/waydroid/overlay/system
+    if ! cmp -s "$SCRCPY_DIR/scrcpy-server-secure" "$overlay/framework/kfl-scrcpy-server.jar" ||
+      ! cmp -s "$here/scrcpy-server/kfl-scrcpy-server" "$overlay/bin/kfl-scrcpy-server" ||
+      ! cmp -s "$here/scrcpy-server/kfl-scrcpy.rc" "$overlay/etc/init/kfl-scrcpy.rc"; then
+      stop_android
+      root install -Dm 644 "$SCRCPY_DIR/scrcpy-server-secure" "$overlay/framework/kfl-scrcpy-server.jar"
+      root install -Dm 755 "$here/scrcpy-server/kfl-scrcpy-server" "$overlay/bin/kfl-scrcpy-server"
+      root install -Dm 644 "$here/scrcpy-server/kfl-scrcpy.rc" "$overlay/etc/init/kfl-scrcpy.rc"
+      state_set waydroid_signin_service 1
+      changed=1
+    fi
   fi
   if ((changed)); then
     note "Restarting Android so the changes take effect"
@@ -773,6 +786,7 @@ done
 say "Adding Kindle to your app menu"
 mkdir -p "$APP_DIR" "$BIN_DIR" "$APPS_DIR"
 install -m 755 "$here/kindle" "$APP_DIR/kindle"
+install -m 755 "$here/scrcpy-server/adb-system" "$APP_DIR/adb-system"
 install -m 644 "$here/lib.sh" "$APP_DIR/lib.sh"
 install -m 644 "$here/apkcert.py" "$here/getkindle.py" "$here/apkicon.py" "$APP_DIR/"
 # The icon: the one saved from the APK, else Waydroid's copy (lib.sh picks).

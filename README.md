@@ -60,10 +60,10 @@ later, use the menu entry's **Sign in to Amazon** action or `kindle --sign-in`.
 Amazon marks its sign-in page as secure, and Android blanks secure pages out of screen captures,
 which is what Kindle's window shows. So for signing in, Kindle's window uses scrcpy's own server
 with one change ([`scrcpy-server/secure-display.patch`](scrcpy-server/secure-display.patch), built
-from scrcpy's tagged source by [`scrcpy-server/build.sh`](scrcpy-server/build.sh)): started as root
-inside Android, it runs as Android's system user and marks its screen secure. (On Waydroid the
-installer turns on Android's debugging mode for that; adb only answers this computer, with its
-own key.) The system user can't use Android's clipboard, so this is only used until you're signed
+from scrcpy's tagged source by [`scrcpy-server/build.sh`](scrcpy-server/build.sh)): it runs as
+Android's system user and marks its screen secure (on the emulator via `adb root`; on Waydroid,
+where `adb root` is disabled, as an on-demand `init` service in Waydroid's read-only system
+overlay). The system user can't use Android's clipboard, so this is only used until you're signed
 in. Where it isn't possible, signing in happens in a separate window showing Android's own screen.
 
 Already have the Kindle APK? `./install.sh --apk kindle.apk` uses it instead (same checks).
