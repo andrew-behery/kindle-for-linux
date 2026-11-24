@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Remove what install.sh set up. Run as your normal user:  ./uninstall.sh
 # If Waydroid was already on this computer before install.sh, it stays: only Kindle and this tool go.
+# The emulator backend lives entirely in ~/.local/share/kindle-for-linux, so it goes with it.
 set -euo pipefail
 
 here=$(dirname "$(readlink -f "$0")")
@@ -10,15 +11,23 @@ source "$here/lib.sh"
 [[ $EUID -ne 0 ]] || die "Run this as your normal user, not with sudo."
 
 preexisting=$(state_get waydroid_preexisting)
+# Did this tool set up Waydroid at all? (Not on emulator-only installs.)
+used_waydroid=$(state_get images_installed_by_us)$(state_get waydroid_installed_by_us)$(state_get arm_layer)
 echo "This removes Kindle for Linux."
-if [[ $preexisting == 1 ]]; then
+if [[ -n $used_waydroid && $preexisting == 1 ]]; then
   echo "Waydroid was here before it, so Waydroid stays. Kindle and its downloaded books are removed."
-else
+elif [[ -n $used_waydroid ]]; then
   echo "That includes Waydroid, the Android system and everything inside it, including downloaded books."
 fi
+[[ ! -d $EMU_SDK ]] || echo "That includes the Android emulator, its Android and everything inside it, including downloaded books."
 read -rp "Continue? [y/N] " ans
 [[ $ans == [yY]* ]] || exit 0
-sudo -v
+[[ -z $used_waydroid ]] || sudo -v
+
+if [[ -d $EMU_SDK ]]; then
+  say "Stopping the Android emulator"
+  BACKEND=emulator stop_android
+fi
 
 pm=""
 for candidate in pacman apt-get dnf zypper; do
@@ -39,8 +48,11 @@ remove_pkgs() {
 }
 
 kfl_adb kill-server >/dev/null 2>&1 || true
+BACKEND=waydroid
 
-if [[ $preexisting == 1 ]]; then
+if [[ -z $used_waydroid ]]; then
+  : # Waydroid was never touched
+elif [[ $preexisting == 1 ]]; then
   say "Removing Kindle from Waydroid"
   if start_android 180; then
     [[ $(container_state) != FROZEN ]] || container_call Unfreeze || true
@@ -105,7 +117,12 @@ if [[ -n $cmd && $(readlink -f "$BIN_DIR/$cmd" 2>/dev/null) == "$APP_DIR/kindle"
 fi
 rm -f "$DESKTOP_FILE"
 update-desktop-database "$APPS_DIR" >/dev/null 2>&1 || true
-sudo rm -rf "$APP_DIR" # the waydroid_script venv may hold root-owned caches
+if [[ -n $used_waydroid ]]; then
+  sudo rm -rf "$APP_DIR" # the waydroid_script venv may hold root-owned caches
+else
+  rm -rf "$APP_DIR"
+fi
+[[ -z $(state_get kvm_group_added) ]] || note "(You stay in the kvm group, which other virtual machines may use too.)"
 rm -rf "$STATE_DIR"
 
 echo "Done."

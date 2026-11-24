@@ -12,7 +12,10 @@ DESKTOP_FILE=$APPS_DIR/kindle-for-linux.desktop
 WAYDROID_DESKTOP=$APPS_DIR/waydroid.$KINDLE_PKG.desktop
 WAYDROID_DATA=$DATA_HOME/waydroid
 WAYDROID_CFG=/var/lib/waydroid/waydroid.cfg
-KINDLE_ICON=$WAYDROID_DATA/data/icons/$KINDLE_PKG.png
+# Kindle's icon: the one the installer saved from the APK, else Waydroid's copy.
+KINDLE_ICON=$APP_DIR/kindle.png
+[[ -f $KINDLE_ICON ]] || KINDLE_ICON=$APP_DIR/kindle.webp
+[[ -f $KINDLE_ICON ]] || KINDLE_ICON=$WAYDROID_DATA/data/icons/$KINDLE_PKG.png
 # Kindle's window is scrcpy showing a virtual Android screen that follows the window's size.
 # x86_64 gets scrcpy's official build (with its own adb) in SCRCPY_DIR; ARM64 uses the distro's.
 SCRCPY_DIR=$APP_DIR/scrcpy
@@ -20,6 +23,19 @@ ADB_HOME=$APP_DIR/adb       # adb's home directory: holds the key Android trusts
 WINDOW_ID=kindle-for-linux  # the window's app ID; matches kindle-for-linux.desktop
 # Our own adb server on its own port, so it never clashes with an adb you run yourself.
 export ANDROID_ADB_SERVER_PORT=5039
+
+# Android runs in one of two ways ("backends"):
+#   waydroid  a container on the host's kernel, drawing with an AMD, Intel or ARM GPU. Light.
+#   emulator  Google's Android emulator (KVM), for NVIDIA-only computers, whose GPU Waydroid's
+#             Android can't use. It runs Google's "Google APIs" Android 15 image: the Google-free
+#             images have no ARM translation, and Kindle is ARM-only.
+EMU_SDK=$APP_DIR/sdk        # the emulator and its system image
+EMU_AVD_HOME=$APP_DIR/avd
+EMU_AVD=kindle-for-linux
+EMU_CONSOLE_PORT=5590       # adb on 5591: outside 5554-5585, where other emulators and adbs look
+EMU_SERIAL=emulator-$EMU_CONSOLE_PORT
+# ...so our adb server looks there too.
+export ADB_LOCAL_TRANSPORT_MAX_PORT=$((EMU_CONSOLE_PORT + 1))
 
 say() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
@@ -38,6 +54,9 @@ state_set() {
   printf '%s=%s\n' "$1" "$2" >>"$STATE_FILE"
 }
 
+BACKEND=${KINDLE_BACKEND:-$(state_get backend)}
+BACKEND=${BACKEND:-waydroid}
+
 # "RUNNING", "FROZEN" or "STOPPED" (from `waydroid status`, whose lines are "Key:<tab>Value").
 session_state() { timeout 10 waydroid status 2>/dev/null | awk -F':[ \t]+' '$1 == "Session" { print $2 }'; }
 container_state() { timeout 10 waydroid status 2>/dev/null | awk -F':[ \t]+' '$1 == "Container" { print $2 }'; }
@@ -45,7 +64,7 @@ container_state() { timeout 10 waydroid status 2>/dev/null | awk -F':[ \t]+' '$1
 # whether it's frozen, which takes no time, while each `waydroid status` takes ~0.4 s. Falls back
 # to Waydroid where the cgroup lives elsewhere.
 WAYDROID_CGROUP=/sys/fs/cgroup/lxc.payload.waydroid
-android_state() { # RUNNING, FROZEN or STOPPED
+wd_state() { # RUNNING, FROZEN or STOPPED
   if [[ -r $WAYDROID_CGROUP/cgroup.events ]]; then
     if grep -qx 'frozen 1' "$WAYDROID_CGROUP/cgroup.events"; then echo FROZEN; else echo RUNNING; fi
   elif [[ $(session_state) == RUNNING ]]; then
@@ -80,9 +99,9 @@ adb_bin() { if [[ -x $SCRCPY_DIR/adb ]]; then echo "$SCRCPY_DIR/adb"; else comma
 # such as the adb server, which would otherwise hold it after the window closes.
 kfl_adb() { HOME=$ADB_HOME timeout "${ADB_TIMEOUT:-30}" "$(adb_bin)" "$@" 9>&-; }
 
-# Connect our adb to Android and print its serial. $1 = seconds to keep trying (default 20).
+# Connect our adb to Waydroid's Android and print its serial. $1 = seconds to keep trying.
 # Android's address rarely changes, so the last one is tried first (asking Waydroid takes ~0.4 s).
-android_connect() {
+wd_connect() {
   local serial st try deadline=$((SECONDS + ${1:-20})) cache=$STATE_DIR/android.serial
   kfl_adb start-server >/dev/null 2>&1 || return 1
   serial=$(cat "$cache" 2>/dev/null || true)
@@ -106,6 +125,98 @@ android_connect() {
   done
 }
 
+# The desktop's scale factor (e.g. 1.6), asked of the compositor; nothing if it can't be found.
+# Waydroid knows it by itself; the emulator needs it to draw Kindle at full resolution.
+display_scale() {
+  local s=""
+  if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] && command -v hyprctl >/dev/null; then
+    s=$(hyprctl monitors -j 2>/dev/null | python3 -c 'import json, sys
+m = json.load(sys.stdin); f = [x for x in m if x.get("focused")] or m
+print(f[0]["scale"])' 2>/dev/null)
+  elif [[ -n ${SWAYSOCK:-} ]] && command -v swaymsg >/dev/null; then
+    s=$(swaymsg -t get_outputs -r 2>/dev/null | python3 -c 'import json, sys
+m = [x for x in json.load(sys.stdin) if x.get("active")]; f = [x for x in m if x.get("focused")] or m
+print(f[0]["scale"])' 2>/dev/null)
+  elif [[ ${XDG_CURRENT_DESKTOP:-} == *KDE* ]] && command -v kscreen-doctor >/dev/null; then
+    s=$(kscreen-doctor -j 2>/dev/null | python3 -c 'import json, sys
+m = [x for x in json.load(sys.stdin)["outputs"] if x.get("enabled")]; f = [x for x in m if x.get("priority") == 1] or m
+print(f[0]["scale"])' 2>/dev/null)
+  elif [[ ${XDG_CURRENT_DESKTOP:-} == *GNOME* ]] && command -v gdbus >/dev/null; then
+    # Mutter's logical monitors are (x, y, scale, transform, primary, ...): take the primary's.
+    s=$(gdbus call --session --dest org.gnome.Mutter.DisplayConfig --object-path /org/gnome/Mutter/DisplayConfig \
+      --method org.gnome.Mutter.DisplayConfig.GetCurrentState 2>/dev/null | python3 -c 'import re, sys
+m = re.findall(r"\(-?\d+, -?\d+, ([\d.]+), uint32 \d+, (true|false)", sys.stdin.read())
+f = [x for x in m if x[1] == "true"] or m
+print(f[0][0])' 2>/dev/null)
+  elif command -v wlr-randr >/dev/null; then
+    s=$(wlr-randr --json 2>/dev/null | python3 -c 'import json, sys
+m = [x for x in json.load(sys.stdin) if x.get("enabled")]
+print(m[0]["scale"])' 2>/dev/null)
+  fi
+  [[ $s =~ ^[0-9]+(\.[0-9]+)?$ ]] && echo "$s"
+}
+
+# The desktop's light/dark preference: "dark", "light", or nothing if it can't tell. Asked of the
+# XDG desktop portal first, which GNOME, KDE, Hyprland, Sway, Cinnamon and others all answer
+# (color-scheme: 1 = prefer dark, 2 = prefer light, 0 = no preference), then of GNOME's and
+# KDE's own settings.
+PORTAL=(--session --dest org.freedesktop.portal.Desktop --object-path /org/freedesktop/portal/desktop)
+desktop_color_scheme() {
+  local v="" k nopref=""
+  if command -v gdbus >/dev/null; then
+    v=$(timeout 3 gdbus call "${PORTAL[@]}" --method org.freedesktop.portal.Settings.ReadOne \
+      org.freedesktop.appearance color-scheme 2>/dev/null ||
+      timeout 3 gdbus call "${PORTAL[@]}" --method org.freedesktop.portal.Settings.Read \
+        org.freedesktop.appearance color-scheme 2>/dev/null || true)
+    case $v in
+      *"uint32 1"*) echo dark && return ;;
+      *"uint32 2"*) echo light && return ;;
+      *"uint32 0"*) nopref=1 ;;
+    esac
+  fi
+  if command -v gsettings >/dev/null; then
+    v=$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null || true)
+    case $v in
+      *dark*) echo dark && return ;;
+      *light*) echo light && return ;;
+      *default*) nopref=1 ;;
+    esac
+    v=$(gsettings get org.gnome.desktop.interface gtk-theme 2>/dev/null || true)
+    if [[ ${v,,} == *dark* ]]; then echo dark && return; fi
+  fi
+  for k in kreadconfig6 kreadconfig5; do
+    command -v "$k" >/dev/null || continue
+    v=$("$k" --group General --key ColorScheme 2>/dev/null || true)
+    if [[ ${v,,} == *dark* ]]; then echo dark && return; fi
+    if [[ -n $v ]]; then echo light && return; fi
+  done
+  # "No preference" and nothing dark anywhere: that's a light desktop.
+  [[ -z $nopref ]] || echo light
+}
+
+# Kindle follows Android's dark mode; make Android's match the desktop. Android is only asked
+# when the desktop's preference differs from what was last set. $1 = adb serial.
+match_color_scheme() {
+  local want
+  want=$(desktop_color_scheme)
+  case $want in
+    dark) want=yes ;;
+    light) want=no ;;
+    *) return 0 ;;
+  esac
+  [[ $(state_get "night_$BACKEND") != "$want" ]] || return 0
+  if kfl_adb -s "$1" shell cmd uimode night "$want" >/dev/null 2>&1; then state_set "night_$BACKEND" "$want"; fi
+}
+
+# While Kindle's window is open, follow the desktop switching between light and dark (the portal
+# announces it). Runs until killed. $1 = adb serial.
+follow_color_scheme() {
+  command -v gdbus >/dev/null || return 0
+  gdbus monitor "${PORTAL[@]}" 2>/dev/null | while read -r line; do
+    [[ $line != *SettingChanged*org.freedesktop.appearance*color-scheme* ]] || match_color_scheme "$1"
+  done
+}
+
 # Android needs a Wayland display to draw into, even though Kindle's window comes from scrcpy.
 # Under X11 there is none, so Android gets cage, a minimal Wayland compositor, running headless.
 display_mode() {
@@ -118,10 +229,10 @@ display_mode() {
   fi
 }
 
-# Start Android in the background (if it isn't running) and wait until it has finished booting.
+# Start Waydroid's Android in the background (if it isn't running) and wait until it has booted.
 # $1 = seconds to wait. The session outlives this script: it keeps running until logout or
 # `kindle --stop`, frozen while Kindle's window is closed.
-start_android() {
+wd_start() {
   local timeout=${1:-180} log=$STATE_DIR/session.log
   mkdir -p "$STATE_DIR"
   if [[ $(session_state) != RUNNING ]]; then
@@ -138,7 +249,7 @@ start_android() {
   done
 }
 
-stop_android() {
+wd_stop() {
   [[ $(session_state) == RUNNING ]] || return 0
   waydroid session stop >/dev/null 2>&1 || true
   local i
@@ -146,6 +257,116 @@ stop_android() {
     [[ $(session_state) == RUNNING ]] || return 0
     sleep 1
   done
+}
+
+# --- The emulator backend ---------------------------------------------------------------------
+
+emu_env() {
+  env HOME="$ADB_HOME" ANDROID_SDK_ROOT="$EMU_SDK" ANDROID_HOME="$EMU_SDK" ANDROID_AVD_HOME="$EMU_AVD_HOME" \
+    ANDROID_EMULATOR_HOME="$ADB_HOME/.android" "$@"
+}
+# The emulator's process: its path starts with our SDK, which nothing else's does.
+emu_pid() { pgrep -u "$UID" -f "^$EMU_SDK/emulator/qemu/" | head -n1 || true; }
+# Is the running emulator showing its own window (sign-in), rather than running headless?
+emu_windowed() { local p; p=$(emu_pid); [[ -n $p ]] && ! tr '\0' ' ' <"/proc/$p/cmdline" | grep -q -- '-no-window'; }
+emu_console() { ADB_TIMEOUT=10 kfl_adb -s "$EMU_SERIAL" emu "$@" 2>/dev/null | tr -d '\r'; }
+emu_state() {
+  [[ -n $(emu_pid) ]] || {
+    echo STOPPED
+    return
+  }
+  if [[ $(emu_console avd status) == *stopped* ]]; then echo FROZEN; else echo RUNNING; fi
+}
+emu_booted() { [[ $(ADB_TIMEOUT=5 kfl_adb -s "$EMU_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r') == 1 ]]; }
+# GPU: software rendering (SwiftShader) on NVIDIA, where the emulator's host-GPU mode has crashed
+# in NVIDIA's driver; the host GPU elsewhere. KINDLE_EMULATOR_GPU overrides.
+emu_gpu() {
+  if [[ -n ${KINDLE_EMULATOR_GPU:-} ]]; then
+    echo "$KINDLE_EMULATOR_GPU"
+  elif [[ -e /proc/driver/nvidia/version ]]; then
+    echo swiftshader_indirect
+  else
+    echo host
+  fi
+}
+emu_start() { # $1 = seconds to wait for the boot; EMU_WINDOW=1 shows the emulator's own window
+  local deadline=$((SECONDS + ${1:-180})) log=$STATE_DIR/emulator.log window=(-no-window)
+  mkdir -p "$STATE_DIR"
+  kfl_adb start-server >/dev/null 2>&1 || true
+  [[ ${EMU_WINDOW:-} != 1 ]] || window=()
+  if [[ -z $(emu_pid) ]]; then
+    # A full boot every time: snapshots would have to be saved on every exit, which takes
+    # 20-40 s and is cut short at logout. Audio stays on for read-aloud and audiobooks.
+    emu_env setsid -f "$EMU_SDK/emulator/emulator" -avd "$EMU_AVD" "${window[@]}" -no-snapshot -no-boot-anim \
+      -no-metrics -skip-adb-auth -ports "$EMU_CONSOLE_PORT,$((EMU_CONSOLE_PORT + 1))" -gpu "$(emu_gpu)" \
+      -camera-back none -camera-front none >"$log" 2>&1 </dev/null 9>&-
+  elif [[ $(emu_state) == FROZEN ]]; then
+    emu_console avd start >/dev/null
+  fi
+  until emu_booted; do
+    ((SECONDS < deadline)) || return 1
+    [[ -n $(emu_pid) ]] || return 1 # it quit: see emulator.log
+    sleep 1
+  done
+  # Android's own screen is never shown (Kindle has its own): keep it tiny, so whatever is drawn
+  # there costs next to nothing. Sign-in shows it at full size.
+  if [[ ${EMU_WINDOW:-} == 1 ]]; then
+    kfl_adb -s "$EMU_SERIAL" shell wm size reset >/dev/null 2>&1 || true
+  else
+    kfl_adb -s "$EMU_SERIAL" shell wm size 160x100 >/dev/null 2>&1 || true
+  fi
+}
+# A clean Android power-off (so recent writes, like a sign-in or a reading position, reach the
+# disk), then the emulator exits; it's killed only if that doesn't happen within 40 s.
+emu_stop() {
+  [[ -n $(emu_pid) ]] || return 0
+  [[ $(emu_state) != FROZEN ]] || emu_console avd start >/dev/null
+  ADB_TIMEOUT=10 kfl_adb -s "$EMU_SERIAL" shell reboot -p >/dev/null 2>&1 || true
+  local i pid
+  for i in $(seq 1 40); do
+    pid=$(emu_pid)
+    [[ -n $pid ]] || return 0
+    ((i != 30)) || emu_console kill >/dev/null || true
+    sleep 1
+  done
+  kill "$pid" 2>/dev/null || true
+}
+
+# --- Either backend ----------------------------------------------------------------------------
+
+# RUNNING, FROZEN (paused: no CPU use) or STOPPED.
+android_state() { if [[ $BACKEND == emulator ]]; then emu_state; else wd_state; fi; }
+# Start Android if needed and wait until it has booted. $1 = seconds to wait.
+start_android() { if [[ $BACKEND == emulator ]]; then emu_start "$@"; else wd_start "$@"; fi; }
+stop_android() { if [[ $BACKEND == emulator ]]; then emu_stop; else wd_stop; fi; }
+# Pause Android while Kindle's window is closed, and resume it.
+android_sleep() {
+  if [[ $BACKEND == emulator ]]; then
+    [[ -z $(emu_pid) ]] || emu_console avd stop >/dev/null
+  else
+    container_call Freeze || true
+  fi
+}
+android_wake() {
+  if [[ $BACKEND == emulator ]]; then
+    [[ $(emu_state) != FROZEN ]] || emu_console avd start >/dev/null
+  else
+    [[ $(wd_state) != FROZEN ]] || container_call Unfreeze || true
+  fi
+}
+# Connect our adb to Android and print its serial. $1 = seconds to keep trying (default 20).
+android_connect() {
+  if [[ $BACKEND == emulator ]]; then
+    local deadline=$((SECONDS + ${1:-20}))
+    kfl_adb start-server >/dev/null 2>&1 || return 1
+    until [[ $(ADB_TIMEOUT=5 kfl_adb -s "$EMU_SERIAL" get-state 2>/dev/null) == device ]]; do
+      ((SECONDS < deadline)) || return 1
+      sleep 0.5
+    done
+    echo "$EMU_SERIAL"
+  else
+    wd_connect "$@"
+  fi
 }
 
 # Installed apps as Waydroid reports them, waiting up to $1 seconds (default 60) for Android to
@@ -174,6 +395,7 @@ kindle_installed() {
 # Waydroid writes its own Kindle menu entry (Exec=waydroid app launch ...). Ours replaces it,
 # so hide Waydroid's. Waydroid keeps an existing NoDisplay key when it rewrites the file.
 hide_waydroid_entry() {
+  [[ $BACKEND == waydroid ]] || return 0
   [[ -f $WAYDROID_DESKTOP ]] || return 0
   grep -q '^NoDisplay=true' "$WAYDROID_DESKTOP" && return 0
   sed -i '/^NoDisplay=/d; /^\[Desktop Entry\]/a NoDisplay=true' "$WAYDROID_DESKTOP"
