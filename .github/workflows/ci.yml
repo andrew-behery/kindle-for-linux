@@ -54,7 +54,7 @@ jobs:
           kindle-for-linux --status
           kindle-for-linux --stop
           apt-get remove -y kindle-for-linux
-          ! command -v kindle-for-linux
+          ! test -e /usr/bin/kindle-for-linux
           ! test -e /usr/share/kindle-for-linux
 
   test-rpm-fedora:
@@ -77,7 +77,7 @@ jobs:
           kindle-for-linux --status
           kindle-for-linux --stop
           dnf remove -y kindle-for-linux
-          ! command -v kindle-for-linux
+          ! test -e /usr/bin/kindle-for-linux
           ! test -e /usr/share/kindle-for-linux
 
   test-aur-arch:
@@ -106,5 +106,5 @@ jobs:
           kindle-for-linux --status
           kindle-for-linux --stop
           pacman -R --noconfirm kindle-for-linux
-          ! command -v kindle-for-linux
+          ! test -e /usr/bin/kindle-for-linux
           ! test -e /usr/share/kindle-for-linux
