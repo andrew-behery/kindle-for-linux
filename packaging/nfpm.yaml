@@ -1,0 +1,122 @@
+name: kindle-for-linux
+arch: all
+platform: linux
+version: "${VERSION}"
+section: utils
+priority: optional
+maintainer: "Andrew Behery <andrewbehery@gmail.com>"
+description: |
+  The real Kindle Android app on any Linux desktop, in its own resizable window.
+  Runs in Waydroid on AMD, Intel, or ARM GPUs, or Google's Android emulator on
+  NVIDIA-only systems, with your Amazon library and Send to Kindle documents.
+  Run kindle-for-linux (or open Kindle from your app menu) for one-time setup.
+vendor: Andrew Behery
+homepage: https://github.com/andrew-behery/kindle-for-linux
+license: MIT
+
+overrides:
+  deb:
+    depends:
+      - bash
+      - python3
+      - curl
+      - unzip
+      - coreutils
+      - util-linux
+      - procps
+    recommends:
+      - libnotify-bin
+      - xdg-utils
+      - desktop-file-utils
+    suggests:
+      - waydroid
+      - cage
+  rpm:
+    depends:
+      - /usr/bin/bash
+      - /usr/bin/python3
+      - /usr/bin/curl
+      - /usr/bin/unzip
+      - /usr/bin/awk
+      - /usr/bin/flock
+      - /usr/bin/pgrep
+    recommends:
+      - libnotify
+      - xdg-utils
+      - desktop-file-utils
+    suggests:
+      - waydroid
+      - cage
+
+contents:
+  - src: VERSION
+    dst: /usr/share/kindle-for-linux/VERSION
+    file_info:
+      mode: 0644
+  - src: kindle
+    dst: /usr/share/kindle-for-linux/kindle
+    file_info:
+      mode: 0755
+  - src: lib.sh
+    dst: /usr/share/kindle-for-linux/lib.sh
+    file_info:
+      mode: 0644
+  - src: install.sh
+    dst: /usr/share/kindle-for-linux/install.sh
+    file_info:
+      mode: 0755
+  - src: uninstall.sh
+    dst: /usr/share/kindle-for-linux/uninstall.sh
+    file_info:
+      mode: 0755
+  - src: verify.sh
+    dst: /usr/share/kindle-for-linux/verify.sh
+    file_info:
+      mode: 0755
+  - src: apkcert.py
+    dst: /usr/share/kindle-for-linux/apkcert.py
+    file_info:
+      mode: 0755
+  - src: apkicon.py
+    dst: /usr/share/kindle-for-linux/apkicon.py
+    file_info:
+      mode: 0644
+  - src: getkindle.py
+    dst: /usr/share/kindle-for-linux/getkindle.py
+    file_info:
+      mode: 0755
+  - src: scrcpy-server/scrcpy-server-secure
+    dst: /usr/share/kindle-for-linux/scrcpy-server/scrcpy-server-secure
+    file_info:
+      mode: 0644
+  - src: scrcpy-server/adb-system
+    dst: /usr/share/kindle-for-linux/scrcpy-server/adb-system
+    file_info:
+      mode: 0755
+  - src: scrcpy-server/kfl-scrcpy-server
+    dst: /usr/share/kindle-for-linux/scrcpy-server/kfl-scrcpy-server
+    file_info:
+      mode: 0755
+  - src: scrcpy-server/kfl-scrcpy.rc
+    dst: /usr/share/kindle-for-linux/scrcpy-server/kfl-scrcpy.rc
+    file_info:
+      mode: 0644
+  - src: /usr/share/kindle-for-linux/kindle
+    dst: /usr/bin/kindle-for-linux
+    type: symlink
+  - src: packaging/kindle-for-linux.desktop
+    dst: /usr/share/applications/kindle-for-linux.desktop
+    file_info:
+      mode: 0644
+  - src: packaging/kindle-for-linux.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/kindle-for-linux.svg
+    file_info:
+      mode: 0644
+  - src: LICENSE
+    dst: /usr/share/licenses/kindle-for-linux/LICENSE
+    file_info:
+      mode: 0644
+  - src: README.md
+    dst: /usr/share/doc/kindle-for-linux/README.md
+    file_info:
+      mode: 0644

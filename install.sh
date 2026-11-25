@@ -216,7 +216,7 @@ root_ready=0
 root() {
   if ((!root_ready)); then
     if ! sudo -n true 2>/dev/null; then
-      [[ -t 0 ]] || die "This step needs your password: run ./install.sh in a terminal on this computer."
+      [[ -t 0 ]] || die "This step needs your password: run setup in a terminal on this computer."
       sudo -v || die "Couldn't get administrator rights."
     fi
     while true; do
@@ -502,7 +502,7 @@ if [[ $BACKEND == emulator ]]; then
     note "Android 15 ($EMU_IMAGE_VERSION) is already installed."
   else
     fetch_verified "$EMU_IMAGE_URL" "$EMU_IMAGE_SHA256" "$CACHE_DIR/$EMU_IMAGE_ZIP"
-    rm -rf "$EMU_SDK/$EMU_IMAGE_DIR"
+    rm -rf "${EMU_SDK:?}/${EMU_IMAGE_DIR:?}"
     mkdir -p "$(dirname "$EMU_SDK/$EMU_IMAGE_DIR")"
     unzip -q "$CACHE_DIR/$EMU_IMAGE_ZIP" -d "$(dirname "$EMU_SDK/$EMU_IMAGE_DIR")"
     echo "$EMU_IMAGE_VERSION" >"$EMU_SDK/$EMU_IMAGE_DIR/kindle-for-linux.version"
@@ -645,6 +645,7 @@ PYCFG
     fi
     # Android's files belong to its system user (uid 1000): writing them needs root unless that's us.
     [[ -w $dir ]] || run=(root)
+    # shellcheck disable=SC2016
     "${run[@]}" bash -c '
       f=$1/adb_keys key=$(<"$2")
       grep -qsF "${key%% *}" "$f" && exit 0
@@ -785,28 +786,46 @@ done
 
 say "Adding Kindle to your app menu"
 mkdir -p "$APP_DIR" "$BIN_DIR" "$APPS_DIR"
-install -m 755 "$here/kindle" "$APP_DIR/kindle"
-install -m 755 "$here/scrcpy-server/adb-system" "$APP_DIR/adb-system"
-install -m 644 "$here/lib.sh" "$APP_DIR/lib.sh"
-install -m 644 "$here/apkcert.py" "$here/getkindle.py" "$here/apkicon.py" "$APP_DIR/"
-# The icon: the one saved from the APK, else Waydroid's copy (lib.sh picks).
+if [[ $here == "$PKG_DIR" ]]; then
+  # Installed via system package (.deb / .rpm / AUR): run straight from /usr/share/kindle-for-linux
+  # so package upgrades update the launcher and helpers immediately.
+  rm -f "$APP_DIR"/{VERSION,kindle,lib.sh,install.sh,uninstall.sh,verify.sh,adb-system,apkcert.py,getkindle.py,apkicon.py}
+  launcher=/usr/bin/kindle-for-linux
+  cmd_name=kindle-for-linux
+  if [[ ! -e $BIN_DIR/kindle || $(readlink -f "$BIN_DIR/kindle" 2>/dev/null) == "$PKG_DIR/kindle" || $(readlink -f "$BIN_DIR/kindle" 2>/dev/null) == "$APP_DIR/kindle" ]]; then
+    ln -sfn "$launcher" "$BIN_DIR/kindle"
+  fi
+  state_set packaged 1
+else
+  install -m 755 "$here/kindle" "$here/install.sh" "$here/uninstall.sh" "$here/verify.sh" "$APP_DIR/"
+  install -m 644 "$here/lib.sh" "$here/apkcert.py" "$here/getkindle.py" "$here/apkicon.py" "$APP_DIR/"
+  [[ ! -f $here/VERSION ]] || install -m 644 "$here/VERSION" "$APP_DIR/VERSION"
+  mkdir -p "$APP_DIR/scrcpy-server"
+  install -m 755 "$here/scrcpy-server/adb-system" "$APP_DIR/adb-system"
+  install -m 755 "$here/scrcpy-server/adb-system" "$here/scrcpy-server/kfl-scrcpy-server" "$APP_DIR/scrcpy-server/"
+  install -m 644 "$here/scrcpy-server/kfl-scrcpy.rc" "$here/scrcpy-server/scrcpy-server-secure" "$APP_DIR/scrcpy-server/"
+  launcher=$APP_DIR/kindle
+  # Don't clobber a different `kindle` command or a "Kindle" entry from another setup.
+  cmd_name=kindle
+  if [[ -e $BIN_DIR/kindle && $(readlink -f "$BIN_DIR/kindle") != "$APP_DIR/kindle" ]]; then
+    cmd_name=kindle-for-linux
+  fi
+  prev=$(state_get command)
+  if [[ -n $prev && $prev != "$cmd_name" && $(readlink -f "$BIN_DIR/$prev" 2>/dev/null) == "$APP_DIR/kindle" ]]; then
+    rm -f "$BIN_DIR/$prev" # this installer's own command under an earlier name
+  fi
+  ln -sfn "$APP_DIR/kindle" "$BIN_DIR/$cmd_name"
+  state_set packaged ""
+fi
+# The icon: the one saved from the APK, else Waydroid's copy, else the package SVG (lib.sh picks).
 KINDLE_ICON=$APP_DIR/kindle.png
 [[ -f $KINDLE_ICON ]] || KINDLE_ICON=$APP_DIR/kindle.webp
 [[ -f $KINDLE_ICON ]] || KINDLE_ICON=$WAYDROID_DATA/data/icons/$KINDLE_PKG.png
+[[ -f $KINDLE_ICON ]] || KINDLE_ICON=kindle-for-linux
 
-# Don't clobber a different `kindle` command or a "Kindle" entry from another setup.
-cmd_name=kindle
-if [[ -e $BIN_DIR/kindle && $(readlink -f "$BIN_DIR/kindle") != "$APP_DIR/kindle" ]]; then
-  cmd_name=kindle-for-linux
-fi
-prev=$(state_get command)
-if [[ -n $prev && $prev != "$cmd_name" && $(readlink -f "$BIN_DIR/$prev" 2>/dev/null) == "$APP_DIR/kindle" ]]; then
-  rm -f "$BIN_DIR/$prev" # this installer's own command under an earlier name
-fi
-ln -sfn "$APP_DIR/kindle" "$BIN_DIR/$cmd_name"
 state_set command "$cmd_name"
 entry_name=Kindle
-if grep -lsx 'Name=Kindle' "$APPS_DIR"/*.desktop | grep -qvF -e "$DESKTOP_FILE" -e "$WAYDROID_DESKTOP"; then
+if (grep -lsx 'Name=Kindle' "$APPS_DIR"/*.desktop 2>/dev/null || true) | grep -qvF -e "$DESKTOP_FILE" -e "$WAYDROID_DESKTOP"; then
   entry_name="Kindle for Linux"
 fi
 cat >"$DESKTOP_FILE" <<EOF
@@ -815,22 +834,28 @@ Type=Application
 Name=$entry_name
 GenericName=E-book reader
 Comment=The Kindle Android app, running in $([[ $BACKEND == emulator ]] && echo "Google's Android emulator" || echo Waydroid)
-Exec=$APP_DIR/kindle
+Exec=$launcher
 Icon=$KINDLE_ICON
 Terminal=false
 Categories=Office;Viewer;
 Keywords=ebook;books;reader;amazon;
 StartupWMClass=$WINDOW_ID
-Actions=sign-in;
+Actions=sign-in;setup;
 
 [Desktop Action sign-in]
 Name=Sign in to Amazon
-Exec=$APP_DIR/kindle --sign-in
+Exec=$launcher --sign-in
+
+[Desktop Action setup]
+Name=Run setup
+Exec=$launcher --setup
 EOF
 hide_waydroid_entry
 update-desktop-database "$APPS_DIR" >/dev/null 2>&1 || true
 note "Menu entry \"$entry_name\", command: $cmd_name"
-[[ :$PATH: == *":$BIN_DIR:"* ]] || note "($BIN_DIR isn't on your PATH, so run it as $BIN_DIR/$cmd_name)"
+if [[ $here != "$PKG_DIR" && :$PATH: != *":$BIN_DIR:"* ]]; then
+  note "($BIN_DIR isn't on your PATH, so run it as $BIN_DIR/$cmd_name)"
+fi
 
 say "Done"
 note "Open Kindle from your app menu (\"$entry_name\") or with: $cmd_name"
@@ -841,7 +866,7 @@ if [[ -n ${fresh_kindle:-} ]]; then
   note "Kindle opens in a moment at Amazon's sign-in page. Once you're signed in, it reopens"
   note "with your library."
   note "(To sign in again later: the menu entry's \"Sign in to Amazon\" action, or $cmd_name --sign-in.)"
-  setsid -f "$APP_DIR/kindle" --sign-in >/dev/null 2>&1 </dev/null
+  setsid -f "$launcher" --sign-in >/dev/null 2>&1 </dev/null
 else
-  setsid -f "$APP_DIR/kindle" >/dev/null 2>&1 </dev/null
+  setsid -f "$launcher" >/dev/null 2>&1 </dev/null
 fi

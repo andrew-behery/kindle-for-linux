@@ -10,9 +10,13 @@ source "$here/lib.sh"
 
 [[ $EUID -ne 0 ]] || die "Run this as your normal user, not with sudo."
 
+yes=0
+[[ ${1:-} == --yes || ${1:-} == -y ]] && yes=1
+
 preexisting=$(state_get waydroid_preexisting)
-# Did this tool set up Waydroid at all? (Not on emulator-only installs.)
-used_waydroid=$(state_get images_installed_by_us)$(state_get waydroid_installed_by_us)$(state_get arm_layer)
+# Did this tool use Waydroid at all? (Not on emulator-only installs.)
+used_waydroid=$(state_get images_installed_by_us)$(state_get waydroid_installed_by_us)$(state_get arm_layer)$(state_get waydroid_signin_service)
+[[ $(state_get backend) != waydroid ]] || used_waydroid+="1"
 echo "This removes Kindle for Linux."
 if [[ -n $used_waydroid && $preexisting == 1 ]]; then
   echo "Waydroid was here before it, so Waydroid stays. Kindle and its downloaded books are removed."
@@ -20,8 +24,10 @@ elif [[ -n $used_waydroid ]]; then
   echo "That includes Waydroid, the Android system and everything inside it, including downloaded books."
 fi
 [[ ! -d $EMU_SDK ]] || echo "That includes the Android emulator, its Android and everything inside it, including downloaded books."
-read -rp "Continue? [y/N] " ans
-[[ $ans == [yY]* ]] || exit 0
+if ((!yes)); then
+  read -rp "Continue? [y/N] " ans
+  [[ $ans == [yY]* ]] || exit 0
+fi
 [[ -z $used_waydroid ]] || sudo -v
 
 if [[ -d $EMU_SDK ]]; then
@@ -62,16 +68,19 @@ elif [[ $preexisting == 1 ]]; then
       prev=$(state_get "prev_$prop")
       [[ -n $prev ]] && waydroid prop set "persist.waydroid.$prop" "$prev" || true
     done
-    # ...and the sign-in overlay service (plus any legacy debugging properties from earlier installs).
-    if [[ -n $(state_get waydroid_signin_service) ]]; then
-      stop_android
-      sudo rm -f /var/lib/waydroid/overlay/system/framework/kfl-scrcpy-server.jar \
-        /var/lib/waydroid/overlay/system/bin/kfl-scrcpy-server \
-        /var/lib/waydroid/overlay/system/etc/init/kfl-scrcpy.rc
-      sudo rmdir /var/lib/waydroid/overlay/system/framework 2>/dev/null || true
-    fi
-    if [[ -n $(state_get debuggable_set_by_us) ]]; then
-      sudo python3 - "$WAYDROID_CFG" <<'PYCFG'
+  else
+    warn "Android didn't start, so Kindle couldn't be removed from it."
+  fi
+  # Remove the sign-in overlay service (plus any legacy debugging properties from earlier installs).
+  if [[ -n $(state_get waydroid_signin_service) ]]; then
+    stop_android
+    sudo rm -f /var/lib/waydroid/overlay/system/framework/kfl-scrcpy-server.jar \
+      /var/lib/waydroid/overlay/system/bin/kfl-scrcpy-server \
+      /var/lib/waydroid/overlay/system/etc/init/kfl-scrcpy.rc
+    sudo rmdir /var/lib/waydroid/overlay/system/framework 2>/dev/null || true
+  fi
+  if [[ -n $(state_get debuggable_set_by_us) ]]; then
+    sudo python3 - "$WAYDROID_CFG" <<'PYCFG'
 import configparser, sys
 cfg = configparser.ConfigParser()
 cfg.optionxform = str
@@ -81,11 +90,8 @@ for key in ("ro.debuggable", "lineage.service.adb.root"):
 with open(sys.argv[1], "w") as f:
     cfg.write(f)
 PYCFG
-      stop_android
-      sudo waydroid upgrade --offline >/dev/null 2>&1 || true
-    fi
-  else
-    warn "Android didn't start, so Kindle couldn't be removed from it."
+    stop_android
+    sudo waydroid upgrade --offline >/dev/null 2>&1 || true
   fi
   # Take our adb key out of the keys Android trusts.
   if [[ -f $ADB_HOME/.android/adbkey.pub ]]; then
@@ -132,19 +138,28 @@ else
   rm -f "$APPS_DIR"/waydroid.*.desktop
 fi
 
-say "Removing the Kindle launcher"
-cmd=$(state_get command)
-if [[ -n $cmd && $(readlink -f "$BIN_DIR/$cmd" 2>/dev/null) == "$APP_DIR/kindle" ]]; then
-  rm -f "$BIN_DIR/$cmd"
-fi
-rm -f "$DESKTOP_FILE"
-update-desktop-database "$APPS_DIR" >/dev/null 2>&1 || true
-if [[ -n $used_waydroid ]]; then
-  sudo rm -rf "$APP_DIR" # the waydroid_script venv may hold root-owned caches
-else
-  rm -rf "$APP_DIR"
-fi
-[[ -z $(state_get kvm_group_added) ]] || note "(You stay in the kvm group, which other virtual machines may use too.)"
-rm -rf "$STATE_DIR"
-
-echo "Done."
+{
+  say "Removing the Kindle launcher"
+  cmd=$(state_get command)
+  for c in "$cmd" kindle kindle-for-linux; do
+    [[ -n $c ]] || continue
+    target=$(readlink -f "$BIN_DIR/$c" 2>/dev/null || true)
+    if [[ $target == "$APP_DIR/kindle" || $target == "$PKG_DIR/kindle" ]]; then
+      rm -f "$BIN_DIR/$c"
+    fi
+  done
+  rm -f "$DESKTOP_FILE"
+  update-desktop-database "$APPS_DIR" >/dev/null 2>&1 || true
+  if [[ -n $used_waydroid ]]; then
+    sudo rm -rf "$APP_DIR" # the waydroid_script venv may hold root-owned caches
+  else
+    rm -rf "$APP_DIR"
+  fi
+  [[ -z $(state_get kvm_group_added) ]] || note "(You stay in the kvm group, which other virtual machines may use too.)"
+  rm -rf "$STATE_DIR" "${XDG_CACHE_HOME:-$HOME/.cache}/kindle-for-linux"
+  if [[ $here == "$PKG_DIR" ]]; then
+    note "To also remove the kindle-for-linux package itself, use your package manager (apt, dnf, or pacman)."
+  fi
+  echo "Done."
+  exit 0
+}

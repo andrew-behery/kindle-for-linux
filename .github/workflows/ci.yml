@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check shell scripts and Python helpers
+        run: |
+          bash -n install.sh kindle lib.sh uninstall.sh verify.sh scrcpy-server/adb-system scrcpy-server/build.sh packaging/build.sh
+          sh -n scrcpy-server/kfl-scrcpy-server
+          python3 -m py_compile apkcert.py apkicon.py getkindle.py
+          shellcheck -x install.sh kindle lib.sh uninstall.sh verify.sh scrcpy-server/adb-system packaging/build.sh
+          shellcheck -s sh scrcpy-server/kfl-scrcpy-server
+
+      - name: Install nfpm
+        run: |
+          curl -fsSL https://github.com/goreleaser/nfpm/releases/download/v2.49.0/nfpm_2.49.0_Linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin nfpm
+
+      - name: Build release artifacts
+        run: ./packaging/build.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: dist/
+
+  test-deb-ubuntu:
+    needs: lint-and-build
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist/
+      - name: Install and smoke-test .deb on Ubuntu 24.04
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ./dist/kindle-for-linux_*.deb desktop-file-utils
+          desktop-file-validate /usr/share/applications/kindle-for-linux.desktop
+          test -f /usr/share/icons/hicolor/scalable/apps/kindle-for-linux.svg
+          test -f /usr/share/licenses/kindle-for-linux/LICENSE
+          kindle-for-linux --version
+          kindle-for-linux --help
+          kindle-for-linux --status
+          kindle-for-linux --stop
+          apt-get remove -y kindle-for-linux
+          ! command -v kindle-for-linux
+          ! test -e /usr/share/kindle-for-linux
+
+  test-rpm-fedora:
+    needs: lint-and-build
+    runs-on: ubuntu-latest
+    container: fedora:41
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist/
+      - name: Install and smoke-test .rpm on Fedora 41
+        run: |
+          dnf install -y ./dist/kindle-for-linux-*.rpm desktop-file-utils
+          desktop-file-validate /usr/share/applications/kindle-for-linux.desktop
+          test -f /usr/share/icons/hicolor/scalable/apps/kindle-for-linux.svg
+          test -f /usr/share/licenses/kindle-for-linux/LICENSE
+          kindle-for-linux --version
+          kindle-for-linux --help
+          kindle-for-linux --status
+          kindle-for-linux --stop
+          dnf remove -y kindle-for-linux
+          ! command -v kindle-for-linux
+          ! test -e /usr/share/kindle-for-linux
+
+  test-aur-arch:
+    needs: lint-and-build
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist/
+      - name: Build and smoke-test PKGBUILD on Arch Linux
+        run: |
+          pacman -Syu --noconfirm --needed base-devel python curl unzip procps-ng gawk desktop-file-utils
+          useradd -m builder
+          mkdir -p /tmp/aur
+          cp dist/PKGBUILD dist/kindle-for-linux-*.tar.gz /tmp/aur/
+          chown -R builder:builder /tmp/aur
+          su - builder -c 'cd /tmp/aur && makepkg -f --noconfirm'
+          pacman -U --noconfirm /tmp/aur/kindle-for-linux-*.pkg.tar.zst
+          desktop-file-validate /usr/share/applications/kindle-for-linux.desktop
+          test -f /usr/share/icons/hicolor/scalable/apps/kindle-for-linux.svg
+          test -f /usr/share/licenses/kindle-for-linux/LICENSE
+          kindle-for-linux --version
+          kindle-for-linux --help
+          kindle-for-linux --status
+          kindle-for-linux --stop
+          pacman -R --noconfirm kindle-for-linux
+          ! command -v kindle-for-linux
+          ! test -e /usr/share/kindle-for-linux

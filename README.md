@@ -21,13 +21,36 @@ fullscreen, with sharp text on scaled displays.
 
 ## Install
 
+Download the package for your distro from the [Releases](https://github.com/andrew-behery/kindle-for-linux/releases) page, or install from the tarball / source:
+
+**Debian, Ubuntu, Linux Mint (`.deb`):**
+```sh
+sudo apt install ./kindle-for-linux_*_all.deb
+kindle-for-linux --setup
+```
+
+**Fedora, openSUSE (`.rpm`):**
+```sh
+sudo dnf install ./kindle-for-linux-*.noarch.rpm   # or: sudo zypper install ./kindle-for-linux-*.noarch.rpm
+kindle-for-linux --setup
+```
+
+**Arch Linux (AUR / package):**
+```sh
+yay -S kindle-for-linux                            # or: sudo pacman -U ./kindle-for-linux-*.pkg.tar.zst
+kindle-for-linux --setup
+```
+
+**Any other distro (release tarball or git clone):**
 ```sh
 git clone https://github.com/andrew-behery/kindle-for-linux.git
 cd kindle-for-linux
 ./install.sh
 ```
 
-Run it as your normal user in a terminal inside your desktop. It asks for your password when it
+*(If you installed a `.deb`, `.rpm`, or Arch package, clicking **Kindle** in your app menu before running `--setup` also opens a terminal and runs first-time setup automatically.)*
+
+Run setup as your normal user inside your desktop session. It asks for your password when it
 needs it (Waydroid's packages and images; KVM access if your distro restricts it), and it's safe
 to rerun. **No Google account, no Play Store.** It:
 
@@ -66,12 +89,11 @@ where `adb root` is disabled, as an on-demand `init` service in Waydroid's read-
 overlay). The system user can't use Android's clipboard, so this is only used until you're signed
 in. Where it isn't possible, signing in happens in a separate window showing Android's own screen.
 
-Already have the Kindle APK? `./install.sh --apk kindle.apk` uses it instead (same checks).
+Already have the Kindle APK? `kindle-for-linux --setup --apk kindle.apk` (or `./install.sh --apk kindle.apk`) uses it instead (same checks).
 
 ## Use
 
-Open **Kindle** from your app menu, or run `kindle` (`kindle-for-linux` if another `kindle`
-command was already there).
+Open **Kindle** from your app menu, or run `kindle` (`kindle-for-linux` when installed as a system package, or if another `kindle` command was already there).
 
 - The first open after logging in starts Android in the background (about 20 s). After that,
   Android stays loaded but paused while Kindle is closed, so it reopens in about a second.
@@ -82,6 +104,7 @@ command was already there).
   everywhere, set a density: `KINDLE_DENSITY=200 kindle` (the default is 160 × your display's
   scale). Book text size is also in Kindle's own reading settings.
 - `kindle --stop` shuts Android down and frees its memory. `kindle --status` shows its state.
+- `kindle --setup`, `kindle --verify [--bench]`, `kindle --uninstall`, and `kindle --version` manage the install from anywhere.
 
 ## Requirements
 
@@ -101,27 +124,35 @@ Android runs in a hidden `cage` compositor; tested in nested X11 with Xephyr + O
 ## Check and measure
 
 ```sh
-./verify.sh          # checks the install, shows disk use, memory and idle CPU
-./verify.sh --bench  # also times opening Kindle, closes and reopens it 3 times and counts
-                     # Android crashes; on Hyprland it also checks Kindle fills the window
-                     # when tiled and fullscreen
+kindle-for-linux --verify          # checks the install, shows disk use, memory and idle CPU
+kindle-for-linux --verify --bench  # also times opening Kindle, closes and reopens it 3 times
+                                   # and counts Android crashes; on Hyprland it also checks
+                                   # Kindle fills the window when tiled and fullscreen
 ```
+*(Or `./verify.sh` / `./verify.sh --bench` from a git clone.)*
 
 ## Uninstall
 
 ```sh
-./uninstall.sh
+kindle-for-linux --uninstall       # or ./uninstall.sh from a git clone
 ```
 
 The emulator and everything in it goes with `~/.local/share/kindle-for-linux`. If Waydroid was
 already on your computer before, it stays and only Kindle is removed; otherwise Waydroid, Android
 and everything in it go, along with any firewall rules and the apt repository this added.
+If you installed a system package, remove it afterwards with `apt`, `dnf`, `zypper`, or `pacman`.
 
 ## Files
 
 | | |
 |---|---|
-| `~/.local/share/kindle-for-linux/` | the launcher, scrcpy and its adb plus the patched server (`scrcpy/`), the adb key (`adb/`), Kindle's icon; on the emulator also the emulator and its image (`sdk/`) and Android's data (`avd/`); on Waydroid the ARM translation installer ([waydroid_script](https://github.com/casualsnek/waydroid_script), pinned and checksummed) |
+| `/usr/share/kindle-for-linux/` | system package files (when installed via `.deb`, `.rpm`, or Arch package) |
+| `~/.local/share/kindle-for-linux/` | scrcpy and its adb plus the patched server (`scrcpy/`), the adb key (`adb/`), Kindle's icon (and the launcher scripts when installed from a tarball/clone); on the emulator also the emulator and its image (`sdk/`) and Android's data (`avd/`); on Waydroid the ARM translation installer ([waydroid_script](https://github.com/casualsnek/waydroid_script), pinned and checksummed) |
 | `~/.local/state/kindle-for-linux/` | `install.log`, `session.log` / `emulator.log`, `window.log`, and what was installed (for uninstall) |
 | `/etc/waydroid-extra/images/` | Waydroid: the pinned Android images |
-| `/var/lib/waydroid/`, `~/.local/share/waydroid/` | Waydroid: its settings and Android's data |
+| `/var/lib/waydroid/`, `~/.local/share/waydroid/` | Waydroid: its settings, sign-in overlay service, and Android's data |
+
+## License
+
+MIT ([`LICENSE`](LICENSE)). The bundled patched scrcpy server in `scrcpy-server/` is built from
+[Genymobile/scrcpy](https://github.com/Genymobile/scrcpy) under the Apache-2.0 license.

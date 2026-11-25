@@ -1,9 +1,11 @@
 # Shared by install.sh, uninstall.sh, verify.sh and the kindle launcher. Sourced, not run.
 # shellcheck shell=bash
+# shellcheck disable=SC2034
 
 KINDLE_PKG=com.amazon.kindle
 DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
 APP_DIR=$DATA_HOME/kindle-for-linux
+PKG_DIR=/usr/share/kindle-for-linux
 STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/kindle-for-linux
 STATE_FILE=$STATE_DIR/state
 APPS_DIR=$DATA_HOME/applications
@@ -12,10 +14,11 @@ DESKTOP_FILE=$APPS_DIR/kindle-for-linux.desktop
 WAYDROID_DESKTOP=$APPS_DIR/waydroid.$KINDLE_PKG.desktop
 WAYDROID_DATA=$DATA_HOME/waydroid
 WAYDROID_CFG=/var/lib/waydroid/waydroid.cfg
-# Kindle's icon: the one the installer saved from the APK, else Waydroid's copy.
+# Kindle's icon: the one the installer saved from the APK, else Waydroid's copy, else the package SVG.
 KINDLE_ICON=$APP_DIR/kindle.png
 [[ -f $KINDLE_ICON ]] || KINDLE_ICON=$APP_DIR/kindle.webp
 [[ -f $KINDLE_ICON ]] || KINDLE_ICON=$WAYDROID_DATA/data/icons/$KINDLE_PKG.png
+[[ -f $KINDLE_ICON ]] || KINDLE_ICON=/usr/share/icons/hicolor/scalable/apps/kindle-for-linux.svg
 # Kindle's window is scrcpy showing a virtual Android screen that follows the window's size.
 # x86_64 gets scrcpy's official build (with its own adb) in SCRCPY_DIR; ARM64 uses the distro's.
 SCRCPY_DIR=$APP_DIR/scrcpy

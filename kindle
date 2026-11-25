@@ -26,15 +26,91 @@ fail() { # TITLE [BODY]
 }
 # For messages: the command as installed, and the state folder as people would type it.
 CMD=$(state_get command)
-CMD=${CMD:-kindle}
+if [[ -z $CMD ]]; then
+  if [[ $here == "$PKG_DIR" ]]; then CMD=kindle-for-linux; else CMD=kindle; fi
+fi
 STATE_DISPLAY=${STATE_DIR/#$HOME/\~}
 
-if [[ $BACKEND == emulator ]]; then
-  [[ -x $EMU_SDK/emulator/emulator ]] || fail "Kindle isn't fully installed." "The Android emulator is missing. Run install.sh again."
-else
-  command -v waydroid >/dev/null || fail "Kindle isn't fully installed." "Waydroid is missing. Run install.sh again."
-fi
-[[ -n $(scrcpy_bin) && -n $(adb_bin) ]] || fail "Kindle isn't fully installed." "scrcpy is missing. Run install.sh again."
+kfl_version() {
+  if [[ -r $here/VERSION ]]; then cat "$here/VERSION"; else echo dev; fi
+}
+
+usage() {
+  cat <<EOF
+Kindle for Linux $(kfl_version)
+
+Usage: $CMD [OPTION]
+  (no option)       open Kindle (runs one-time setup automatically if needed)
+  --sign-in         open Kindle at Amazon's sign-in page
+  --stop            shut Android down and free its memory
+  --status          show whether Android is running, paused, or stopped
+  --setup [ARGS]    run setup (accepts --check or --apk FILE)
+  --verify [--bench] check the install and measure disk, memory, CPU, and open speed
+  --uninstall       remove Kindle for Linux data and Android setup
+  --version         show version
+  --help            show this help
+EOF
+}
+
+needs_setup() {
+  [[ -n $(state_get backend) ]] || return 0
+  if [[ $BACKEND == emulator ]]; then
+    [[ -x $EMU_SDK/emulator/emulator ]] || return 0
+  else
+    command -v waydroid >/dev/null || return 0
+  fi
+  [[ -n $(scrcpy_bin) && -n $(adb_bin) ]] || return 0
+  return 1
+}
+
+# Launch a script in a terminal window when started from an app menu (no TTY).
+run_in_terminal() { # cmd [args...]
+  # shellcheck disable=SC2016
+  local wrap='"$1" "${@:2}"; rc=$?; if ((rc)); then printf "\nStopped (exit %d). Press Enter to close..." "$rc"; read -r _; fi'
+  if command -v xdg-terminal-exec >/dev/null; then
+    exec xdg-terminal-exec bash -c "$wrap" _ "$@"
+  elif command -v x-terminal-emulator >/dev/null; then
+    exec x-terminal-emulator -e bash -c "$wrap" _ "$@"
+  elif command -v gnome-terminal >/dev/null; then
+    exec gnome-terminal -- bash -c "$wrap" _ "$@"
+  elif command -v ptyxis >/dev/null; then
+    exec ptyxis -- bash -c "$wrap" _ "$@"
+  elif command -v kgx >/dev/null; then
+    exec kgx -- bash -c "$wrap" _ "$@"
+  elif command -v konsole >/dev/null; then
+    exec konsole -e bash -c "$wrap" _ "$@"
+  elif command -v xfce4-terminal >/dev/null; then
+    exec xfce4-terminal -x bash -c "$wrap" _ "$@"
+  elif command -v foot >/dev/null; then
+    exec foot bash -c "$wrap" _ "$@"
+  elif command -v kitty >/dev/null; then
+    exec kitty bash -c "$wrap" _ "$@"
+  elif command -v alacritty >/dev/null; then
+    exec alacritty -e bash -c "$wrap" _ "$@"
+  elif command -v ghostty >/dev/null; then
+    exec ghostty -e bash -c "$wrap" _ "$@"
+  elif command -v wezterm >/dev/null; then
+    exec wezterm start -- bash -c "$wrap" _ "$@"
+  elif command -v tilix >/dev/null; then
+    exec tilix -e bash -c "$wrap" _ "$@"
+  elif command -v mate-terminal >/dev/null; then
+    exec mate-terminal -x bash -c "$wrap" _ "$@"
+  elif command -v lxterminal >/dev/null; then
+    exec lxterminal -e bash -c "$wrap" _ "$@"
+  elif command -v xterm >/dev/null; then
+    exec xterm -e bash -c "$wrap" _ "$@"
+  fi
+  fail "Kindle needs one-time setup." "Open a terminal and run: $CMD --setup"
+}
+
+run_setup() {
+  [[ -x $here/install.sh ]] || fail "Setup script is missing." "Reinstall kindle-for-linux."
+  if [[ -t 0 || -t 1 || " $* " == *" --check "* ]]; then
+    exec "$here/install.sh" "$@"
+  else
+    run_in_terminal "$here/install.sh" "$@"
+  fi
+}
 
 # Amazon's sign-in page is marked secure (FLAG_SECURE), and Android blanks such windows out of
 # screen captures, which is what Kindle's window shows. A patched scrcpy server
@@ -44,7 +120,8 @@ fi
 # and as the system user Android doesn't share its clipboard; so this "sign-in mode" is used only
 # until you're signed in, with paste typed in as keystrokes (--legacy-paste). Then Kindle reopens
 # in normal mode.
-SECURE_SERVER=$SCRCPY_DIR/scrcpy-server-secure
+SECURE_SERVER=$here/scrcpy-server/scrcpy-server-secure
+[[ -f $SECURE_SERVER ]] || SECURE_SERVER=$SCRCPY_DIR/scrcpy-server-secure
 adb_system_bin() {
   if [[ -x $here/adb-system ]]; then
     echo "$here/adb-system"
@@ -295,8 +372,11 @@ for name, want in (("signin", lambda l: l.startswith("sign in with amazon")), ("
         break
 ' 2>/dev/null || true)
     case $found in
-      signin\ *) kfl_adb -s "$1" shell input tap ${found#signin } >/dev/null 2>&1 ;;
-      more\ *) kfl_adb -s "$1" shell input tap ${found#more } >/dev/null 2>&1 ;;
+      signin\ * | more\ *)
+        local x y
+        read -r _ x y <<<"$found"
+        kfl_adb -s "$1" shell input tap "$x" "$y" >/dev/null 2>&1
+        ;;
     esac
     sleep 2
   done
@@ -363,23 +443,50 @@ sign_in_window() {
 }
 
 case ${1:-} in
+  --help | -h)
+    usage
+    ;;
+  --version | -V)
+    printf 'kindle-for-linux %s\n' "$(kfl_version)"
+    ;;
+  --setup)
+    shift
+    run_setup "$@"
+    ;;
+  --verify)
+    shift
+    [[ -x $here/verify.sh ]] || die "verify.sh is missing."
+    exec "$here/verify.sh" "$@"
+    ;;
+  --uninstall)
+    shift
+    [[ -x $here/uninstall.sh ]] || die "uninstall.sh is missing."
+    exec "$here/uninstall.sh" "$@"
+    ;;
   --sign-in)
     [[ $(display_mode) != none ]] || die "Run this from inside your desktop session."
+    if needs_setup; then run_setup; fi
     open_kindle sign-in
     ;;
   --stop)
+    [[ -n $(state_get backend) ]] || exit 0
     stop_android
     kfl_adb kill-server >/dev/null 2>&1 || true
     ;;
   --status)
-    printf 'Android (%s): %s\n' "$BACKEND" "$(android_state)"
+    if needs_setup; then
+      printf 'Not set up yet. Run "%s --setup" to install Android and Kindle.\n' "$CMD"
+    else
+      printf 'Android (%s): %s\n' "$BACKEND" "$(android_state)"
+    fi
     ;;
   "")
     [[ $(display_mode) != none ]] || die "Run this from inside your desktop session."
+    if needs_setup; then run_setup; fi
     if [[ $BACKEND == waydroid && $(display_mode) == x11 ]]; then
-      command -v cage >/dev/null || fail "Kindle isn't fully installed." "cage, needed on X11 desktops, is missing. Run install.sh again."
+      command -v cage >/dev/null || fail "Kindle isn't fully installed." "cage, needed on X11 desktops, is missing. Run \"$CMD --setup\"."
     fi
     open_kindle auto
     ;;
-  *) die "unknown option: $1 (try --sign-in, --stop or --status)" ;;
+  *) die "unknown option: $1 (try --help)" ;;
 esac

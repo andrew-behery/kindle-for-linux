@@ -63,17 +63,25 @@ else
     bad "virtual device missing (rerun install.sh)"
   fi
 fi
-if [[ -x $APP_DIR/kindle && -f $DESKTOP_FILE ]]; then ok "launcher and menu entry installed ($(sed -n 's/^Name=//p' "$DESKTOP_FILE" | head -n1))"; else bad "launcher or menu entry missing"; fi
+launcher=$APP_DIR/kindle
+[[ $(state_get packaged) != 1 && $here != "$PKG_DIR" ]] || launcher=$PKG_DIR/kindle
+desktop_entry=$DESKTOP_FILE
+[[ -f $desktop_entry ]] || desktop_entry=/usr/share/applications/kindle-for-linux.desktop
+if [[ -x $launcher && -f $desktop_entry ]]; then ok "launcher and menu entry installed ($(sed -n 's/^Name=//p' "$desktop_entry" | head -n1))"; else bad "launcher or menu entry missing"; fi
 if [[ -f $KINDLE_ICON ]]; then ok "icon: $KINDLE_ICON"; else bad "no icon for Kindle"; fi
 if [[ -n $(scrcpy_bin) ]]; then ok "$("$(scrcpy_bin)" --version 2>/dev/null | head -n1 | cut -d' ' -f1-2) ($(scrcpy_bin))"; else bad "scrcpy missing (Kindle's window)"; fi
-if [[ $BACKEND == emulator || -f $ADB_HOME/.android/adbkey ]]; then ok "adb key for Android in $ADB_HOME"; else bad "no adb key (rerun install.sh)"; fi
+if [[ $BACKEND == emulator || -f $ADB_HOME/.android/adbkey ]]; then ok "adb key for Android in $ADB_HOME"; else bad "no adb key (rerun setup)"; fi
+secure_srv=$here/scrcpy-server/scrcpy-server-secure
+[[ -f $secure_srv ]] || secure_srv=$SCRCPY_DIR/scrcpy-server-secure
+adb_sys=$here/scrcpy-server/adb-system
+[[ -x $adb_sys ]] || adb_sys=$APP_DIR/adb-system
 if [[ $BACKEND == waydroid ]]; then
-  if [[ -f $SCRCPY_DIR/scrcpy-server-secure && -f /var/lib/waydroid/overlay/system/etc/init/kfl-scrcpy.rc && -x $APP_DIR/adb-system ]]; then
+  if [[ -f $secure_srv && -f /var/lib/waydroid/overlay/system/etc/init/kfl-scrcpy.rc && -x $adb_sys ]]; then
     ok "sign-in service in Waydroid's overlay (Amazon sign-in shows in Kindle's window)"
   else
     info "no sign-in overlay service: signing in uses a separate window"
   fi
-elif [[ -f $SCRCPY_DIR/scrcpy-server-secure ]]; then
+elif [[ -f $secure_srv ]]; then
   ok "patched scrcpy server for signing in inside Kindle's window"
 else
   info "no patched scrcpy server: signing in uses a separate window"
@@ -150,7 +158,6 @@ fi
 
 if ((bench)); then
   say "Opening speed, resizing, close and reopen"
-  launcher=$APP_DIR/kindle
   # On Hyprland the window itself is watched and resized; elsewhere "open" is Kindle's first frame
   # in scrcpy's log, and the resize checks are skipped.
   hypr=0
@@ -162,7 +169,7 @@ if ((bench)); then
       echo shown
     fi
   }
-  launcher_pid() { pgrep -u "$UID" -f "^(/usr/bin/)?bash $APP_DIR/kindle\$" | head -n1 || true; }
+  launcher_pid() { pgrep -u "$UID" -f "^(/usr/bin/)?bash $launcher\$" | head -n1 || true; }
   # Android's crashes, from its dropbox (Java crashes, native tombstones, watchdog restarts),
   # plus host coredumps on Waydroid (shared kernel) and the emulator quitting on the emulator.
   crashes() {

@@ -26,6 +26,7 @@ if [[ ${1:-} == -s && ${3:-} == shell && ${4:-} == CLASSPATH=/data/local/tmp/scr
   ((has_cleanup)) || args+=(cleanup=false)
 
   child=""
+  # shellcheck disable=SC2329
   cleanup() {
     [[ -z $child ]] || kill "$child" 2>/dev/null || true
     timeout 10 "$REAL_ADB" -s "$serial" shell \
@@ -37,6 +38,7 @@ if [[ ${1:-} == -s && ${3:-} == shell && ${4:-} == CLASSPATH=/data/local/tmp/scr
   trap 'exit 130' INT
 
   # Stop any previous instance and write the validated server arguments.
+  # shellcheck disable=SC2016
   printf '%s\n' "${args[@]}" | "$REAL_ADB" -s "$serial" shell '
     if [ "$(getprop debug.kfl.scrcpy)" = 1 ]; then
       setprop debug.kfl.scrcpy 0
@@ -52,6 +54,7 @@ if [[ ${1:-} == -s && ${3:-} == shell && ${4:-} == CLASSPATH=/data/local/tmp/scr
   '
 
   # Start the system-uid service and stream its output until it exits.
+  # shellcheck disable=SC2016
   "$REAL_ADB" -s "$serial" shell '
     tpid=""
     trap '\''[ -z "$tpid" ] || kill "$tpid" 2>/dev/null || true'\'' EXIT HUP INT TERM

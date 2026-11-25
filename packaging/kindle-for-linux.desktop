@@ -1,0 +1,20 @@
+[Desktop Entry]
+Type=Application
+Name=Kindle
+GenericName=E-book reader
+Comment=The real Kindle Android app on Linux
+Exec=/usr/bin/kindle-for-linux
+Icon=kindle-for-linux
+Terminal=false
+Categories=Office;Viewer;
+Keywords=ebook;books;reader;amazon;
+StartupWMClass=kindle-for-linux
+Actions=sign-in;setup;
+
+[Desktop Action sign-in]
+Name=Sign in to Amazon
+Exec=/usr/bin/kindle-for-linux --sign-in
+
+[Desktop Action setup]
+Name=Run setup
+Exec=/usr/bin/kindle-for-linux --setup

@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches VERSION
+        run: |
+          tag_ver="${GITHUB_REF_NAME#v}"
+          file_ver="$(<VERSION)"
+          test "$tag_ver" = "$file_ver" || { echo "Tag $tag_ver != VERSION $file_ver" >&2; exit 1; }
+
+      - name: Install nfpm
+        run: |
+          curl -fsSL https://github.com/goreleaser/nfpm/releases/download/v2.49.0/nfpm_2.49.0_Linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin nfpm
+
+      - name: Build release packages
+        run: ./packaging/build.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-packages
+          path: dist/
+
+  test-ubuntu:
+    needs: build
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: release-packages, path: dist/ }
+      - run: |
+          apt-get update && apt-get install -y ./dist/kindle-for-linux_*.deb
+          kindle-for-linux --version && kindle-for-linux --status
+
+  test-fedora:
+    needs: build
+    runs-on: ubuntu-latest
+    container: fedora:41
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: release-packages, path: dist/ }
+      - run: |
+          dnf install -y ./dist/kindle-for-linux-*.rpm
+          kindle-for-linux --version && kindle-for-linux --status
+
+  publish:
+    needs: [build, test-ubuntu, test-fedora]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: release-packages, path: dist/ }
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "Kindle for Linux $GITHUB_REF_NAME" \
+            --generate-notes
