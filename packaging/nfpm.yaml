@@ -49,6 +49,22 @@ overrides:
       - cage
 
 contents:
+  - dst: /usr/share/kindle-for-linux
+    type: dir
+    file_info:
+      mode: 0755
+  - dst: /usr/share/kindle-for-linux/scrcpy-server
+    type: dir
+    file_info:
+      mode: 0755
+  - dst: /usr/share/licenses/kindle-for-linux
+    type: dir
+    file_info:
+      mode: 0755
+  - dst: /usr/share/doc/kindle-for-linux
+    type: dir
+    file_info:
+      mode: 0755
   - src: VERSION
     dst: /usr/share/kindle-for-linux/VERSION
     file_info:
