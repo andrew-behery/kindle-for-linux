@@ -56,12 +56,41 @@ jobs:
           dnf install -y ./dist/kindle-for-linux-*.rpm
           kindle-for-linux --version && kindle-for-linux --status
 
+  build-arch:
+    needs: build
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: release-packages, path: dist/ }
+      - name: Build and smoke-test Arch package
+        run: |
+          pacman -Syu --noconfirm --needed base-devel python curl unzip procps-ng gawk
+          useradd -m builder
+          mkdir -p /tmp/aur
+          cp dist/PKGBUILD dist/kindle-for-linux-*.tar.gz /tmp/aur/
+          chown -R builder:builder /tmp/aur
+          su - builder -c 'cd /tmp/aur && makepkg -f --noconfirm'
+          pacman -U --noconfirm /tmp/aur/kindle-for-linux-*.pkg.tar.zst
+          kindle-for-linux --version && kindle-for-linux --status
+          pacman -R --noconfirm kindle-for-linux
+          mkdir -p arch-dist
+          cp /tmp/aur/kindle-for-linux-*.pkg.tar.zst arch-dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch-packages
+          path: arch-dist/
+
   publish:
-    needs: [build, test-ubuntu, test-fedora]
+    needs: [build, test-ubuntu, test-fedora, build-arch]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with: { name: release-packages, path: dist/ }
+      - uses: actions/download-artifact@v4
+        with: { name: arch-packages, path: dist/ }
+      - name: Refresh SHA256SUMS
+        run: (cd dist && sha256sum kindle-for-linux* >SHA256SUMS)
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

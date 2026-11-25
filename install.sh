@@ -815,6 +815,9 @@ else
     rm -f "$BIN_DIR/$prev" # this installer's own command under an earlier name
   fi
   ln -sfn "$APP_DIR/kindle" "$BIN_DIR/$cmd_name"
+  if [[ $cmd_name != kindle-for-linux && (! -e $BIN_DIR/kindle-for-linux || $(readlink -f "$BIN_DIR/kindle-for-linux" 2>/dev/null) == "$APP_DIR/kindle") ]]; then
+    ln -sfn "$APP_DIR/kindle" "$BIN_DIR/kindle-for-linux"
+  fi
   state_set packaged ""
 fi
 # The icon: the one saved from the APK, else Waydroid's copy, else the package SVG (lib.sh picks).

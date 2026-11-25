@@ -21,7 +21,7 @@ fullscreen, with sharp text on scaled displays.
 
 ## Install
 
-Download the package for your distro from the [Releases](https://github.com/andrew-behery/kindle-for-linux/releases) page, or install from the tarball / source:
+Download the package for your distro from the [Releases](https://github.com/andrew-behery/kindle-for-linux/releases) page, or install from source below.
 
 **Debian, Ubuntu, Linux Mint (`.deb`):**
 ```sh
@@ -29,19 +29,25 @@ sudo apt install ./kindle-for-linux_*_all.deb
 kindle-for-linux --setup
 ```
 
-**Fedora, openSUSE (`.rpm`):**
+**Fedora (`.rpm`):**
 ```sh
-sudo dnf install ./kindle-for-linux-*.noarch.rpm   # or: sudo zypper install ./kindle-for-linux-*.noarch.rpm
+sudo dnf install ./kindle-for-linux-*.noarch.rpm
 kindle-for-linux --setup
 ```
 
-**Arch Linux (AUR / package):**
+**openSUSE (`.rpm`):**
 ```sh
-yay -S kindle-for-linux                            # or: sudo pacman -U ./kindle-for-linux-*.pkg.tar.zst
+sudo zypper install ./kindle-for-linux-*.noarch.rpm
 kindle-for-linux --setup
 ```
 
-**Any other distro (release tarball or git clone):**
+**Arch Linux (`.pkg.tar.zst`):**
+```sh
+sudo pacman -U ./kindle-for-linux-*.pkg.tar.zst
+kindle-for-linux --setup
+```
+
+**Any distro (from source):**
 ```sh
 git clone https://github.com/andrew-behery/kindle-for-linux.git
 cd kindle-for-linux
@@ -123,19 +129,27 @@ Android runs in a hidden `cage` compositor; tested in nested X11 with Xephyr + O
 
 ## Check and measure
 
+Check the install and show disk use, memory, and idle CPU:
+
 ```sh
-kindle-for-linux --verify          # checks the install, shows disk use, memory and idle CPU
-kindle-for-linux --verify --bench  # also times opening Kindle, closes and reopens it 3 times
-                                   # and counts Android crashes; on Hyprland it also checks
-                                   # Kindle fills the window when tiled and fullscreen
+kindle-for-linux --verify
 ```
-*(Or `./verify.sh` / `./verify.sh --bench` from a git clone.)*
+
+Also time opening Kindle, close and reopen it 3 times, and count Android crashes (on Hyprland, also checks that Kindle fills the window when tiled and fullscreen):
+
+```sh
+kindle-for-linux --verify --bench
+```
+
+*(From a git clone, `./verify.sh` and `./verify.sh --bench` also work.)*
 
 ## Uninstall
 
 ```sh
-kindle-for-linux --uninstall       # or ./uninstall.sh from a git clone
+kindle-for-linux --uninstall
 ```
+
+*(From a git clone, `./uninstall.sh` also works.)*
 
 The emulator and everything in it goes with `~/.local/share/kindle-for-linux`. If Waydroid was
 already on your computer before, it stays and only Kindle is removed; otherwise Waydroid, Android
