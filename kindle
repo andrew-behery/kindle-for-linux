@@ -186,6 +186,38 @@ restore_main_screen() {
   kfl_adb -s "$serial" shell wm density reset >/dev/null 2>&1 || true
 }
 
+# Watch Kindle inside its virtual screen: if you back out of the app on Android, Android leaves
+# scrcpy's virtual screen empty, so scrcpy would keep showing the last frozen frame. Once Kindle
+# has been seen on that screen and then leaves it with no app left there, close scrcpy ($1).
+watch_app() { # $1 = scrcpy pid, $2 = window log
+  local disp="" seen=0 gone=0 line app
+  while kill -0 "$1" 2>/dev/null; do
+    if [[ -z $disp ]]; then
+      disp=$(sed -n 's/.*\[server\] INFO: New display: .* (id=\([0-9]*\)).*/\1/p' "$2" 2>/dev/null | tail -n1)
+    fi
+    if [[ -n $disp ]]; then
+      app=$(ADB_TIMEOUT=5 kfl_adb -s "$serial" shell dumpsys window displays 2>/dev/null | tr -d '\r' |
+        awk -v d="Display: mDisplayId=$disp " '
+          index($0, d) { in_d = 1; next }
+          in_d && /Display: mDisplayId=/ { in_d = 0 }
+          in_d && /mFocusedApp=/ { sub(/.*mFocusedApp=/, ""); app = $0 }
+          END { print app }
+        ')
+      if [[ $app == *"$KINDLE_PKG/"* ]]; then
+        seen=1
+        gone=0
+      elif ((seen)) && [[ $app == null ]]; then
+        gone=$((gone + 1))
+        if ((gone >= 2)); then
+          kill "$1" 2>/dev/null || true
+          return
+        fi
+      fi
+    fi
+    sleep 2
+  done
+}
+
 # Watch a sign-in in Kindle's window. Once Amazon's page has gone and Kindle is back in front,
 # Kindle registers this device with Amazon; its log says if that failed. Then close the window
 # (scrcpy, $1) so Kindle reopens: in normal mode if signed in, else at the sign-in page again.
@@ -288,7 +320,7 @@ open_kindle() { # $1 = auto (sign in first if Kindle isn't signed in yet) or sig
   # shellcheck disable=SC2064
   trap "pkill -P $! 2>/dev/null; kill $! 2>/dev/null; sleep 2; android_sleep" EXIT
 
-  local server=() extra=() adb_env=() screen pid reopen started drops=0
+  local server=() extra=() adb_env=() screen pid reopen started drops=0 watcher=""
   : >"$log" # this window's log; a reconnect (below) adds to it
   while :; do
     server=() extra=() adb_env=(HOME="$ADB_HOME" ADB="$(adb_bin)")
@@ -327,9 +359,16 @@ open_kindle() { # $1 = auto (sign in first if Kindle isn't signed in yet) or sig
       >>"$log" 2>&1 </dev/null 9>&- &
     pid=$!
     started=$SECONDS
-    [[ $mode != sign-in ]] || watch_sign_in "$pid" 9>&- &
+    if [[ $mode == sign-in ]]; then
+      watch_sign_in "$pid" 9>&- &
+    else
+      watch_app "$pid" "$log" 9>&- &
+    fi
+    watcher=$!
     rc=0
     wait "$pid" || rc=$?
+    kill "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
     reopen=$(cat "$STATE_DIR/reopen" 2>/dev/null || true)
     if [[ $reopen == normal ]]; then
       restore_main_screen

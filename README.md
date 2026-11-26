@@ -25,7 +25,7 @@ Install the package for your distro from the [Releases](https://github.com/andre
 
 **Arch Linux:**
 ```sh
-curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.2/kindle-for-linux-0.1.2-1-any.pkg.tar.zst -o /tmp/kindle-for-linux.pkg.tar.zst
+curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.3/kindle-for-linux-0.1.3-1-any.pkg.tar.zst -o /tmp/kindle-for-linux.pkg.tar.zst
 sudo pacman -U /tmp/kindle-for-linux.pkg.tar.zst
 kindle-for-linux --setup
 ```
@@ -33,20 +33,20 @@ kindle-for-linux --setup
 
 **Debian, Ubuntu, Linux Mint:**
 ```sh
-curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.2/kindle-for-linux_0.1.2_all.deb -o /tmp/kindle-for-linux.deb
+curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.3/kindle-for-linux_0.1.3_all.deb -o /tmp/kindle-for-linux.deb
 sudo apt install /tmp/kindle-for-linux.deb
 kindle-for-linux --setup
 ```
 
 **Fedora:**
 ```sh
-sudo dnf install https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.2/kindle-for-linux-0.1.2-1.noarch.rpm
+sudo dnf install https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.3/kindle-for-linux-0.1.3-1.noarch.rpm
 kindle-for-linux --setup
 ```
 
 **openSUSE:**
 ```sh
-curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.2/kindle-for-linux-0.1.2-1.noarch.rpm -o /tmp/kindle-for-linux.rpm
+curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.3/kindle-for-linux-0.1.3-1.noarch.rpm -o /tmp/kindle-for-linux.rpm
 sudo zypper install /tmp/kindle-for-linux.rpm
 kindle-for-linux --setup
 ```
