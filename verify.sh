@@ -97,7 +97,7 @@ if [[ $state != STOPPED ]]; then
   if serial=$(android_connect 20); then
     ok "adb reaches Android ($serial)"
     if [[ $(kfl_adb -s "$serial" shell pm path "$KINDLE_PKG" 2>/dev/null) == package:* ]]; then
-      ok "Kindle is installed ($(kfl_adb -s "$serial" shell dumpsys package "$KINDLE_PKG" | sed -n 's/^ *versionName=//p' | head -n1))"
+      ok "Kindle is installed ($(kfl_adb -s "$serial" shell dumpsys package "$KINDLE_PKG" | awk -F= '/^ *versionName=/ { if (!v) v = $2 } END { print v }'))"
     else
       bad "Kindle isn't installed"
     fi
@@ -164,7 +164,7 @@ if ((bench)); then
   [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] && command -v hyprctl >/dev/null && hypr=1
   window() {
     if ((hypr)); then
-      hyprctl clients -j | jq -r --arg c "$WINDOW_ID" '.[] | select(.class == $c) | "\(.address) \(.size | join("x")) \(.stableId)"' | head -n1
+      hyprctl clients -j | jq -r --arg c "$WINDOW_ID" 'first(.[] | select(.class == $c)) // empty | "\(.address) \(.size | join("x")) \(.stableId)"'
     elif grep -qs 'Texture' "$STATE_DIR/window.log"; then
       echo shown
     fi
@@ -219,12 +219,20 @@ if ((bench)); then
   # Android's virtual screen size, which should follow the window.
   vd_size() {
     kfl_adb -s "$(android_connect 5)" shell dumpsys display 2>/dev/null |
-      sed -n 's/.*DisplayDeviceInfo{"scrcpy".* \([0-9]* x [0-9]*\), modeId.*density \([0-9]*\),.*/\1 at density \2/p' | head -n1
+      sed -n 's/.*DisplayDeviceInfo{"scrcpy".* \([0-9]* x [0-9]*\), modeId.*density \([0-9]*\),.*/\1 at density \2/p' |
+      awk 'NR == 1 { s = $0 } END { print s }'
   }
   # Kindle's own bounds: smaller than the screen means it's letterboxed.
   kindle_bounds() {
     kfl_adb -s "$(android_connect 5)" shell dumpsys activity activities 2>/dev/null |
-      grep -m1 -A40 "$KINDLE_PKG/" | grep -m1 -oE 'mBounds=Rect\([^)]*\)' | sed 's/mBounds=Rect(0, 0 - \([0-9]*\), \([0-9]*\))/\1 x \2/'
+      awk -v pkg="$KINDLE_PKG/" '
+        !done && index($0, pkg) { in_pkg = 1; n = 40 }
+        in_pkg && match($0, /mBounds=Rect\(0, 0 - ([0-9]+), ([0-9]+)\)/, m) {
+          out = m[1] " x " m[2]; done = 1; in_pkg = 0
+        }
+        in_pkg && --n <= 0 { in_pkg = 0 }
+        END { print out }
+      '
   }
   fullscreen() {
     hyprctl dispatch "hl.dsp.focus({ window = \"address:$(window | cut -d' ' -f1)\" })" >/dev/null
