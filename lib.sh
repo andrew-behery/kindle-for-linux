@@ -39,6 +39,10 @@ EMU_CONSOLE_PORT=5590       # adb on 5591: outside 5554-5585, where other emulat
 EMU_SERIAL=emulator-$EMU_CONSOLE_PORT
 # ...so our adb server looks there too.
 export ADB_LOCAL_TRANSPORT_MAX_PORT=$((EMU_CONSOLE_PORT + 1))
+# Forward adbd's TCP port (5555) over QEMU's user-mode network: the emulator's default
+# virtio-vsock adb link (AdbVsockPipe) can drop mid-session under scrcpy load.
+EMU_ADB_TCP_PORT=$((EMU_CONSOLE_PORT + 2))
+EMU_ADB_TCP=127.0.0.1:$EMU_ADB_TCP_PORT
 
 say() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
@@ -366,12 +370,26 @@ android_wake() {
 # Connect our adb to Android and print its serial. $1 = seconds to keep trying (default 20).
 android_connect() {
   if [[ $BACKEND == emulator ]]; then
-    local deadline=$((SECONDS + ${1:-20}))
+    local deadline=$((SECONDS + ${1:-20})) st
     kfl_adb start-server >/dev/null 2>&1 || return 1
+    st=$(HOME=$ADB_HOME timeout 5 "$(adb_bin)" -s "$EMU_ADB_TCP" get-state 2>/dev/null 9>&- || true)
+    if [[ $st == device ]]; then
+      echo "$EMU_ADB_TCP"
+      return 0
+    fi
+    [[ $st != offline ]] || kfl_adb disconnect "$EMU_ADB_TCP" >/dev/null 2>&1 || true
     until [[ $(ADB_TIMEOUT=5 kfl_adb -s "$EMU_SERIAL" get-state 2>/dev/null) == device ]]; do
       ((SECONDS < deadline)) || return 1
       sleep 0.5
     done
+    if emu_console redir list | grep -qE "(^|[[:space:]])tcp:${EMU_ADB_TCP_PORT}[[:space:]]" ||
+      [[ $(emu_console redir add "tcp:$EMU_ADB_TCP_PORT:5555") == *OK* ]]; then
+      HOME=$ADB_HOME timeout 5 "$(adb_bin)" connect "$EMU_ADB_TCP" >/dev/null 2>&1 9>&- || true
+      if [[ $(HOME=$ADB_HOME timeout 5 "$(adb_bin)" -s "$EMU_ADB_TCP" get-state 2>/dev/null 9>&- || true) == device ]]; then
+        echo "$EMU_ADB_TCP"
+        return 0
+      fi
+    fi
     echo "$EMU_SERIAL"
   else
     wd_connect "$@"

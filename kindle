@@ -291,7 +291,7 @@ open_kindle() { # $1 = auto (sign in first if Kindle isn't signed in yet) or sig
   local server=() extra=() adb_env=() screen pid reopen started drops=0
   : >"$log" # this window's log; a reconnect (below) adds to it
   while :; do
-    server=() extra=() adb_env=(ADB="$(adb_bin)")
+    server=() extra=() adb_env=(HOME="$ADB_HOME" ADB="$(adb_bin)")
     rm -f "$STATE_DIR/reopen"
     if [[ $mode == sign-in ]]; then
       server=(SCRCPY_SERVER_PATH="$SECURE_SERVER")
@@ -301,7 +301,7 @@ open_kindle() { # $1 = auto (sign in first if Kindle isn't signed in yet) or sig
       screen=(--new-display="$sign_in_size/$density")
       extra=(--legacy-paste)
       if [[ $BACKEND == waydroid ]]; then
-        adb_env=(ADB="$(adb_system_bin)" REAL_ADB="$(adb_bin)")
+        adb_env=(HOME="$ADB_HOME" ADB="$(adb_system_bin)" REAL_ADB="$(adb_bin)")
         extra+=(--no-cleanup)
       fi
       notify "Sign in to Amazon" "Once you're signed in, Kindle opens your library."
