@@ -288,7 +288,8 @@ open_kindle() { # $1 = auto (sign in first if Kindle isn't signed in yet) or sig
   # shellcheck disable=SC2064
   trap "pkill -P $! 2>/dev/null; kill $! 2>/dev/null; sleep 2; android_sleep" EXIT
 
-  local server=() extra=() adb_env=() screen pid reopen
+  local server=() extra=() adb_env=() screen pid reopen started drops=0
+  : >"$log" # this window's log; a reconnect (below) adds to it
   while :; do
     server=() extra=() adb_env=(ADB="$(adb_bin)")
     rm -f "$STATE_DIR/reopen"
@@ -323,8 +324,9 @@ open_kindle() { # $1 = auto (sign in first if Kindle isn't signed in yet) or sig
     env "${adb_env[@]}" "${server[@]}" SDL_APP_ID="$WINDOW_ID" SCRCPY_ICON_PATH="$KINDLE_ICON" "${big[@]}" \
       stdbuf -oL -eL "$(scrcpy_bin)" --serial="$serial" "${screen[@]}" \
       --start-app="$KINDLE_PKG" --window-title=Kindle --no-audio --no-mouse-hover --no-mipmaps "${extra[@]}" \
-      >"$log" 2>&1 </dev/null 9>&- &
+      >>"$log" 2>&1 </dev/null 9>&- &
     pid=$!
+    started=$SECONDS
     [[ $mode != sign-in ]] || watch_sign_in "$pid" 9>&- &
     rc=0
     wait "$pid" || rc=$?
@@ -337,6 +339,17 @@ open_kindle() { # $1 = auto (sign in first if Kindle isn't signed in yet) or sig
     elif [[ $reopen == sign-in ]]; then
       notify "Amazon didn't finish signing you in" "The sign-in page opens again. Please try once more."
       prepare_sign_in "$density" || true
+      continue
+    fi
+    # scrcpy exits with 2 when its link to Android drops. The emulator's adb link (virtio-vsock)
+    # can drop for a moment under load, e.g. while a book opens, and comes back within a second
+    # with Android and Kindle untouched. Reopen the window then instead of reporting a failure.
+    # Only for a window that had been open a while, and a few times at most, so a link that
+    # keeps failing still ends in the error below.
+    if ((rc == 2)) && [[ $mode == normal ]] && ((SECONDS - started >= 5 && drops < 3)) &&
+      serial=$(android_connect 15); then
+      drops=$((drops + 1))
+      printf '\n[kindle] Lost the connection to Android; reopening the window (%d).\n\n' "$drops" >>"$log"
       continue
     fi
     break
