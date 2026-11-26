@@ -21,29 +21,33 @@ fullscreen, with sharp text on scaled displays.
 
 ## Install
 
-Download the package for your distro from the [Releases](https://github.com/andrew-behery/kindle-for-linux/releases) page, or install from source below.
+Install the package for your distro from the [Releases](https://github.com/andrew-behery/kindle-for-linux/releases) page, or install from source below.
 
-**Debian, Ubuntu, Linux Mint (`.deb`):**
+**Arch Linux:**
 ```sh
-sudo apt install ./kindle-for-linux_*_all.deb
+curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.0/kindle-for-linux-0.1.0-1-any.pkg.tar.zst -o /tmp/kindle-for-linux.pkg.tar.zst
+sudo pacman -U /tmp/kindle-for-linux.pkg.tar.zst
+kindle-for-linux --setup
+```
+*(Not on the AUR yet because new AUR account registrations are temporarily paused — it will be published there once registrations reopen. A verified `PKGBUILD` is also attached to each [Release](https://github.com/andrew-behery/kindle-for-linux/releases) if you prefer building with `makepkg -si`.)*
+
+**Debian, Ubuntu, Linux Mint:**
+```sh
+curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.0/kindle-for-linux_0.1.0_all.deb -o /tmp/kindle-for-linux.deb
+sudo apt install /tmp/kindle-for-linux.deb
 kindle-for-linux --setup
 ```
 
-**Fedora (`.rpm`):**
+**Fedora:**
 ```sh
-sudo dnf install ./kindle-for-linux-*.noarch.rpm
+sudo dnf install https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.0/kindle-for-linux-0.1.0-1.noarch.rpm
 kindle-for-linux --setup
 ```
 
-**openSUSE (`.rpm`):**
+**openSUSE:**
 ```sh
-sudo zypper install ./kindle-for-linux-*.noarch.rpm
-kindle-for-linux --setup
-```
-
-**Arch Linux (`.pkg.tar.zst`):**
-```sh
-sudo pacman -U ./kindle-for-linux-*.pkg.tar.zst
+curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.0/kindle-for-linux-0.1.0-1.noarch.rpm -o /tmp/kindle-for-linux.rpm
+sudo zypper install /tmp/kindle-for-linux.rpm
 kindle-for-linux --setup
 ```
 
