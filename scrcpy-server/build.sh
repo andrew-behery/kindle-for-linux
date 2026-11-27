@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Rebuild scrcpy-server-secure: scrcpy's own server, from its tagged source, with one change
-# (secure-display.patch): when it runs as root, the virtual screen it creates is marked secure, so
+# Rebuild scrcpy-server-secure: scrcpy's own server, from its tagged source, with the changes in
+# secure-display.patch: when it runs as root, the virtual screen it creates is marked secure, so
 # windows Android would otherwise blank out of the picture (Amazon's sign-in page is FLAG_SECURE)
-# are shown. Without root it behaves exactly like the official server.
+# are shown. As root or not, it also survives fast window resizes on Android 14/15, and gives
+# Kindle desktop keyboard and mouse conventions (KindleInput.java: Ctrl+F, page turning with the
+# wheel and keys, Ctrl+=/- text size, right-click menus, Esc).
 #
 #   ANDROID_HOME=~/Android/Sdk ./build.sh
 #

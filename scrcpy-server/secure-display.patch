@@ -41,6 +41,638 @@ index d7d1a76..5c6df70 100644
              }
          } catch (Exception e) {
              Ln.w("Cannot set UID", e);
+diff --git i/server/src/main/java/com/genymobile/scrcpy/control/Controller.java w/server/src/main/java/com/genymobile/scrcpy/control/Controller.java
+index 55d6e11..60f511a 100644
+--- i/server/src/main/java/com/genymobile/scrcpy/control/Controller.java
++++ w/server/src/main/java/com/genymobile/scrcpy/control/Controller.java
+@@ -72,7 +72,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
+     private static final int DEFAULT_DEVICE_ID = 0;
+ 
+     // control_msg.h values of the pointerId field in inject_touch_event message
+-    private static final int POINTER_ID_MOUSE = -1;
++    static final int POINTER_ID_MOUSE = -1;
+ 
+     // Interval between simulated user activity events
+     private static final long KEEP_ACTIVE_INTERVAL_MS = 4000;
+@@ -354,13 +354,14 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
+                     }
+                     return true;
+                 case ControlMessage.TYPE_INJECT_TOUCH_EVENT:
+-                    if (supportsInputEvents) {
++                    if (supportsInputEvents && !kindleInput.onTouch(
++                            msg.getAction(), msg.getPointerId(), msg.getPosition(), msg.getPressure(), msg.getActionButton(), msg.getButtons())) {
+                         injectTouch(
+                                 msg.getAction(), msg.getPointerId(), msg.getPosition(), msg.getPressure(), msg.getActionButton(), msg.getButtons());
+                     }
+                     return true;
+                 case ControlMessage.TYPE_INJECT_SCROLL_EVENT:
+-                    if (supportsInputEvents) {
++                    if (supportsInputEvents && !kindleInput.onScroll(msg.getPosition(), msg.getHScroll(), msg.getVScroll(), msg.getButtons())) {
+                         injectScroll(msg.getPosition(), msg.getHScroll(), msg.getVScroll(), msg.getButtons());
+                     }
+                     return true;
+@@ -440,7 +441,13 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
+         throw new AssertionError("Unexpected message type: " + type);
+     }
+ 
++    // Kindle for Linux: desktop keyboard and mouse conventions for Kindle (see KindleInput)
++    private final KindleInput kindleInput = new KindleInput(this);
++
+     private boolean injectKeycode(int action, int keycode, int repeat, int metaState) {
++        if (kindleInput.onKey(action, keycode, repeat, metaState)) {
++            return true;
++        }
+         if (keepDisplayPowerOff && action == KeyEvent.ACTION_UP && (keycode == KeyEvent.KEYCODE_POWER || keycode == KeyEvent.KEYCODE_WAKEUP)) {
+             assert displayId != Device.DISPLAY_ID_NONE;
+             scheduleDisplayPowerOff(displayId);
+@@ -509,7 +516,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
+         return Pair.create(point, targetDisplayId);
+     }
+ 
+-    private boolean injectTouch(int action, long pointerId, Position position, float pressure, int actionButton, int buttons) {
++    boolean injectTouch(int action, long pointerId, Position position, float pressure, int actionButton, int buttons) {
+         long now = SystemClock.uptimeMillis();
+ 
+         Pair<Point, Integer> pair = getEventPointAndDisplayId(position);
+@@ -620,7 +627,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
+         return Device.injectEvent(event, targetDisplayId, Device.INJECT_MODE_ASYNC);
+     }
+ 
+-    private boolean injectScroll(Position position, float hScroll, float vScroll, int buttons) {
++    boolean injectScroll(Position position, float hScroll, float vScroll, int buttons) {
+         long now = SystemClock.uptimeMillis();
+ 
+         Pair<Point, Integer> pair = getEventPointAndDisplayId(position);
+@@ -739,7 +746,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
+         return Device.injectKeyEvent(action, keyCode, repeat, metaState, actionDisplayId, injectMode);
+     }
+ 
+-    private boolean pressReleaseKeycode(int keyCode, int injectMode) {
++    boolean pressReleaseKeycode(int keyCode, int injectMode) {
+         int actionDisplayId = getActionDisplayId();
+         if (actionDisplayId == Device.DISPLAY_ID_NONE) {
+             return false;
+@@ -747,7 +754,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
+         return Device.pressReleaseKeycode(keyCode, actionDisplayId, injectMode);
+     }
+ 
+-    private int getActionDisplayId() {
++    int getActionDisplayId() {
+         if (displayId != Device.DISPLAY_ID_NONE) {
+             // Real screen mirrored, use the source display id
+             return displayId;
+diff --git i/server/src/main/java/com/genymobile/scrcpy/control/KindleInput.java w/server/src/main/java/com/genymobile/scrcpy/control/KindleInput.java
+new file mode 100644
+index 0000000..5b822ec
+--- /dev/null
++++ w/server/src/main/java/com/genymobile/scrcpy/control/KindleInput.java
+@@ -0,0 +1,546 @@
++package com.genymobile.scrcpy.control;
++
++import com.genymobile.scrcpy.device.Device;
++import com.genymobile.scrcpy.display.DisplayInfo;
++import com.genymobile.scrcpy.model.Position;
++import com.genymobile.scrcpy.model.Size;
++import com.genymobile.scrcpy.util.Ln;
++import com.genymobile.scrcpy.wrappers.ServiceManager;
++
++import android.content.ComponentName;
++import android.os.IBinder;
++import android.os.SystemClock;
++import android.view.InputDevice;
++import android.view.KeyEvent;
++import android.view.MotionEvent;
++
++import java.io.BufferedReader;
++import java.io.InputStreamReader;
++import java.lang.reflect.Field;
++import java.lang.reflect.Method;
++import java.util.List;
++import java.util.regex.Matcher;
++import java.util.regex.Pattern;
++
++/**
++ * Kindle for Linux: desktop keyboard and mouse conventions for the Kindle app.
++ *
++ * Kindle was made for phones and tablets. This translates what a desktop user does into what Kindle
++ * understands, in the window's own context (whether a book is open, whether a menu is):
++ * <ul>
++ * <li>Ctrl+F: search (Android's Search key: library search in the library, book search in a book).</li>
++ * <li>In a book: Page Up/Down, the arrow keys, Space/Shift+Space and the mouse wheel turn pages as a click on the
++ * page's right or left edge does, with Kindle's page-turn animation (a page swapped all at once looks like a flash in
++ * the window's video). One page per key press, and one per wheel gesture: Kindle can take longer to turn a page than a
++ * key repeats or a wheel spins, so turns sent faster would queue up and go on after the key is released.</li>
++ * <li>Right-click: press and hold where the pointer is (Kindle's menu for a word or a book). Dragging
++ * with the right button held extends the selection.</li>
++ * <li>Esc: closes what's open (a dialog or menu window, the book's toolbar, a selection and its menu), never the
++ * book and never Kindle.</li>
++ * <li>Shift+wheel: scrolls sideways (Kindle's rows of covers).</li>
++ * </ul>
++ */
++final class KindleInput {
++
++    private static final String KINDLE = "com.amazon.kindle";
++    private static final String KINDLE_HOME = "com.amazon.kcp.oob.MainActivity";
++
++    // Long enough for Android's long press (400 ms by default) to fire before the finger lifts
++    private static final long HOLD_MS = 600;
++    // A left press held this long without moving is Kindle's long press as well (a selection)
++    private static final long LEFT_HOLD_MS = 500;
++    private static final int TOUCH_SLOP = 12;
++    // Wheel events closer together than this are one gesture (one page)
++    private static final long WHEEL_GESTURE_GAP_MS = 200;
++    private static final float WHEEL_STEP = 0.5f;
++    private static final long STATE_CACHE_MS = 300;
++
++    private static final int MODS = KeyEvent.META_SHIFT_ON | KeyEvent.META_CTRL_ON | KeyEvent.META_ALT_ON | KeyEvent.META_META_ON;
++
++    private static final int ACT_NONE = 0;
++    private static final int ACT_SEARCH = 1;
++    private static final int ACT_NEXT = 2;
++    private static final int ACT_PREV = 3;
++    private static final int ACT_ESCAPE = 4;
++
++    private final Controller controller;
++
++    // Keys whose press was handled here: their repeats and release are not passed on either
++    private final int[] heldAction = new int[KeyEvent.getMaxKeyCode() + 1];
++    private boolean shiftDown;
++
++    // Right button held: injected as a finger pressing and holding
++    private boolean rightHolding;
++    private long rightDownTime;
++    private Position lastRightPosition;
++
++    // Left button press, to tell a long press (a selection) from a click
++    private long leftDownTime;
++    private Position leftDownPosition;
++    private boolean leftMoved;
++
++    // After a press and hold in a book, a selection, its menu and the dictionary may be showing (Android can't
++    // tell). Esc then taps the page: the 1st tap closes the menu and the dictionary, the 2nd clears the highlight.
++    // (Back would too, but with nothing selected it closes the book.) If the hold selected nothing, the 1st tap
++    // opens the toolbar, and the next Esc closes it again.
++    private int selectionTaps;
++
++    private float wheelAccumulator;
++    private long lastWheelTime;
++    private boolean wheelTurned;
++
++    private State cachedState;
++    private long cachedStateTime;
++    private int cachedStateDisplayId = -1;
++
++    KindleInput(Controller controller) {
++        this.controller = controller;
++    }
++
++    // ---------------------------------------------------------------------------------------------
++    // Keys
++
++    /** Returns true if the key event was handled (and must not be injected as is). */
++    boolean onKey(int action, int keycode, int repeat, int metaState) {
++        if (keycode == KeyEvent.KEYCODE_SHIFT_LEFT || keycode == KeyEvent.KEYCODE_SHIFT_RIGHT) {
++            shiftDown = action == KeyEvent.ACTION_DOWN;
++        } else {
++            shiftDown = (metaState & KeyEvent.META_SHIFT_ON) != 0;
++        }
++
++        if (keycode < 0 || keycode >= heldAction.length) {
++            return false;
++        }
++
++        int held = heldAction[keycode];
++        if (held != ACT_NONE) {
++            // The rest of a press handled here
++            if (action == KeyEvent.ACTION_UP) {
++                heldAction[keycode] = ACT_NONE;
++            }
++            // Key repeats don't turn more pages (see the class comment)
++            return true;
++        }
++
++        if (action != KeyEvent.ACTION_DOWN || repeat != 0) {
++            return false;
++        }
++
++        int act = actionFor(keycode, metaState & MODS);
++        if (act == ACT_NONE) {
++            return false;
++        }
++
++        boolean handled;
++        switch (act) {
++            case ACT_SEARCH:
++                handled = controller.pressReleaseKeycode(KeyEvent.KEYCODE_SEARCH, Device.INJECT_MODE_ASYNC);
++                break;
++            case ACT_NEXT:
++            case ACT_PREV:
++                handled = turnPageByKey(act == ACT_NEXT ? 1 : -1);
++                break;
++            case ACT_ESCAPE:
++                escape();
++                handled = true;
++                break;
++            default:
++                handled = false;
++        }
++
++        if (handled) {
++            heldAction[keycode] = act;
++        }
++        return handled;
++    }
++
++    private static int actionFor(int keycode, int mods) {
++        if (mods == KeyEvent.META_CTRL_ON && keycode == KeyEvent.KEYCODE_F) {
++            return ACT_SEARCH;
++        }
++        if (mods == KeyEvent.META_SHIFT_ON && keycode == KeyEvent.KEYCODE_SPACE) {
++            return ACT_PREV;
++        }
++        if (mods == 0) {
++            switch (keycode) {
++                case KeyEvent.KEYCODE_ESCAPE:
++                    return ACT_ESCAPE;
++                case KeyEvent.KEYCODE_PAGE_DOWN:
++                case KeyEvent.KEYCODE_DPAD_RIGHT:
++                case KeyEvent.KEYCODE_DPAD_DOWN:
++                case KeyEvent.KEYCODE_SPACE:
++                    return ACT_NEXT;
++                case KeyEvent.KEYCODE_PAGE_UP:
++                case KeyEvent.KEYCODE_DPAD_LEFT:
++                case KeyEvent.KEYCODE_DPAD_UP:
++                    return ACT_PREV;
++                default:
++                    return ACT_NONE;
++            }
++        }
++        return ACT_NONE;
++    }
++
++    private boolean turnPageByKey(int direction) {
++        int displayId = controller.getActionDisplayId();
++        if (displayId == Device.DISPLAY_ID_NONE) {
++            return false;
++        }
++        State state = getState(displayId, false);
++        if (!state.readerInFront()) {
++            return false; // the key goes to Android as is
++        }
++        return turnPage(displayId, direction);
++    }
++
++    /** A click near the right (next) or left (previous) edge of the page, halfway down: Kindle's own tap zones. */
++    private boolean turnPage(int displayId, int direction) {
++        Size size = getDisplaySize(displayId);
++        if (size == null) {
++            return false;
++        }
++        selectionTaps = 0;
++        float x = size.getWidth() * (direction > 0 ? 1 - PAGE_EDGE : PAGE_EDGE);
++        tap(displayId, x, size.getHeight() / 2f);
++        return true;
++    }
++
++    // Where Esc taps to clear a selection, as a fraction of the height (the top margin)
++    private static final float SELECTION_TAP_Y = 0.025f;
++    // Where a page turn clicks, as a fraction of the width from the edge
++    private static final float PAGE_EDGE = 0.08f;
++
++    private void escape() {
++        int displayId = controller.getActionDisplayId();
++        if (displayId == Device.DISPLAY_ID_NONE) {
++            return;
++        }
++        State state = getState(displayId, true);
++        if (!state.kindleInFront() || state.overlay) {
++            selectionTaps = 0;
++            back(); // close the dialog or menu (or whatever isn't Kindle)
++            return;
++        }
++        if (state.reader) {
++            // Back would close the book: a tap on the page closes the toolbar or the selection instead
++            if (state.toolbarOpen || selectionTaps > 0) {
++                Size size = getDisplaySize(displayId);
++                if (size != null) {
++                    if (state.toolbarOpen) {
++                        // The toolbar and a selection are never open together: once the toolbar shows, the
++                        // selection is gone. A tap on the page in the middle closes the toolbar.
++                        selectionTaps = 0;
++                        tap(displayId, size.getWidth() / 2f, size.getHeight() / 2f);
++                    } else {
++                        // In the top margin (the book's title): the selection's menu and the dictionary are never
++                        // there, wherever the word is
++                        --selectionTaps;
++                        tap(displayId, size.getWidth() / 2f, size.getHeight() * SELECTION_TAP_Y);
++                    }
++                }
++            }
++            return;
++        }
++        if (state.home) {
++            selectionTaps = 0;
++            return; // Back would leave Kindle (and close its window)
++        }
++        selectionTaps = 0;
++        back();
++    }
++
++    private void back() {
++        controller.pressReleaseKeycode(KeyEvent.KEYCODE_BACK, Device.INJECT_MODE_ASYNC);
++    }
++
++    // ---------------------------------------------------------------------------------------------
++    // Mouse
++
++    /** Returns true if the scroll event was handled (and must not be injected as is). */
++    boolean onScroll(Position position, float hScroll, float vScroll, int buttons) {
++        if (vScroll == 0) {
++            return false; // sideways scrolling (a touchpad) already turns pages
++        }
++        int displayId = controller.getActionDisplayId();
++        if (displayId == Device.DISPLAY_ID_NONE) {
++            return false;
++        }
++
++        long now = SystemClock.uptimeMillis();
++        State state = getState(displayId, false);
++        if (state.readerInFront()) {
++            // One page per wheel gesture: wheel events closer together than WHEEL_GESTURE_GAP_MS (a fast spin, a
++            // touchpad swipe) are one gesture; a pause, or the other direction, starts the next one
++            boolean newGesture = now - lastWheelTime > WHEEL_GESTURE_GAP_MS || Math.signum(vScroll) != Math.signum(wheelAccumulator);
++            lastWheelTime = now;
++            if (newGesture) {
++                wheelAccumulator = 0;
++                wheelTurned = false;
++            }
++            if (!wheelTurned) {
++                wheelAccumulator += vScroll;
++                // A notch is 1; a high-resolution wheel or a touchpad sends it in parts
++                if (Math.abs(wheelAccumulator) >= WHEEL_STEP) {
++                    wheelTurned = true;
++                    // Wheel down (negative) is the next page
++                    turnPage(displayId, wheelAccumulator < 0 ? 1 : -1);
++                }
++            }
++            return true;
++        }
++
++        if (shiftDown && hScroll == 0) {
++            // Wheel down scrolls right, as in desktop apps
++            controller.injectScroll(position, -vScroll, 0, buttons);
++            return true;
++        }
++        return false;
++    }
++
++    /** Returns true if the touch event was handled (and must not be injected as is). */
++    boolean onTouch(int action, long pointerId, Position position, float pressure, int actionButton, int buttons) {
++        if (pointerId != Controller.POINTER_ID_MOUSE) {
++            return false;
++        }
++        long now = SystemClock.uptimeMillis();
++
++        if (rightHolding) {
++            if (action == MotionEvent.ACTION_MOVE) {
++                // Before the long press fires, a small move would turn it into a swipe
++                if (now - rightDownTime >= HOLD_MS) {
++                    lastRightPosition = position;
++                    controller.injectTouch(MotionEvent.ACTION_MOVE, pointerId, position, 1f, 0, 0);
++                }
++                return true;
++            }
++            if (action == MotionEvent.ACTION_UP && (actionButton & MotionEvent.BUTTON_SECONDARY) != 0) {
++                long wait = HOLD_MS - (now - rightDownTime);
++                if (wait > 0) {
++                    SystemClock.sleep(wait);
++                }
++                controller.injectTouch(MotionEvent.ACTION_UP, pointerId, lastRightPosition, 0f, 0, 0);
++                rightHolding = false;
++                selectionTaps = 2;
++                return true;
++            }
++            return true; // other buttons while the right one is held
++        }
++
++        if (action == MotionEvent.ACTION_DOWN && actionButton == MotionEvent.BUTTON_SECONDARY && buttons == MotionEvent.BUTTON_SECONDARY) {
++            rightHolding = true;
++            rightDownTime = now;
++            lastRightPosition = position;
++            controller.injectTouch(MotionEvent.ACTION_DOWN, pointerId, position, 1f, 0, 0);
++            return true;
++        }
++
++        // Left button: passed on as is, but noted, to know whether a long press made a selection
++        if (action == MotionEvent.ACTION_DOWN && (actionButton & MotionEvent.BUTTON_PRIMARY) != 0) {
++            leftDownTime = now;
++            leftDownPosition = position;
++            leftMoved = false;
++        } else if (action == MotionEvent.ACTION_MOVE && leftDownPosition != null && !leftMoved) {
++            int dx = position.getPoint().getX() - leftDownPosition.getPoint().getX();
++            int dy = position.getPoint().getY() - leftDownPosition.getPoint().getY();
++            leftMoved = dx * dx + dy * dy > TOUCH_SLOP * TOUCH_SLOP;
++        } else if (action == MotionEvent.ACTION_UP && (actionButton & MotionEvent.BUTTON_PRIMARY) != 0) {
++            selectionTaps = !leftMoved && now - leftDownTime >= LEFT_HOLD_MS ? 2 : 0;
++            leftDownPosition = null;
++        }
++        return false;
++    }
++
++    // ---------------------------------------------------------------------------------------------
++    // Injection
++
++    private static void tap(int displayId, float x, float y) {
++        long downTime = SystemClock.uptimeMillis();
++        injectFingers(displayId, downTime, MotionEvent.ACTION_DOWN, new float[][]{{x, y}});
++        SystemClock.sleep(40);
++        injectFingers(displayId, downTime, MotionEvent.ACTION_UP, new float[][]{{x, y}});
++    }
++
++    // Synthetic finger ids: away from scrcpy's own (0-9), and below 32 (Android rejects higher ids)
++    private static final int FINGER_ID_BASE = 20;
++
++    private static void injectFingers(int displayId, long downTime, int action, float[][] points) {
++        int n = points.length;
++        MotionEvent.PointerProperties[] props = new MotionEvent.PointerProperties[n];
++        MotionEvent.PointerCoords[] coords = new MotionEvent.PointerCoords[n];
++        for (int i = 0; i < n; ++i) {
++            props[i] = new MotionEvent.PointerProperties();
++            props[i].id = FINGER_ID_BASE + i;
++            props[i].toolType = MotionEvent.TOOL_TYPE_FINGER;
++            coords[i] = new MotionEvent.PointerCoords();
++            coords[i].x = points[i][0];
++            coords[i].y = points[i][1];
++            coords[i].pressure = 1f;
++            coords[i].size = 0.05f;
++        }
++        long now = SystemClock.uptimeMillis();
++        MotionEvent event = MotionEvent.obtain(downTime, now, action, n, props, coords, 0, 0, 1f, 1f, 0, 0,
++                InputDevice.SOURCE_TOUCHSCREEN, 0);
++        Device.injectEvent(event, displayId, Device.INJECT_MODE_ASYNC);
++        event.recycle();
++    }
++
++    private static Size getDisplaySize(int displayId) {
++        DisplayInfo info = ServiceManager.getDisplayManager().getDisplayInfo(displayId);
++        return info != null ? info.getSize() : null;
++    }
++
++    // ---------------------------------------------------------------------------------------------
++    // What's on Kindle's screen
++
++    private static final class State {
++        String topPackage;
++        String topClass;
++        boolean reader; // a book is open
++        boolean home; // Kindle's home/library screen
++        boolean overlay; // a Kindle dialog, menu or popup window is showing
++        boolean toolbarOpen; // the book's toolbar is showing (Kindle then shows the system bars)
++
++        boolean kindleInFront() {
++            return KINDLE.equals(topPackage);
++        }
++
++        boolean readerInFront() {
++            return reader && !overlay;
++        }
++    }
++
++    private State getState(int displayId, boolean fresh) {
++        long now = SystemClock.uptimeMillis();
++        if (!fresh && cachedState != null && cachedStateDisplayId == displayId && now - cachedStateTime < STATE_CACHE_MS) {
++            return cachedState;
++        }
++        State state = new State();
++        ComponentName top = getTopActivity(displayId);
++        if (top != null) {
++            state.topPackage = top.getPackageName();
++            state.topClass = top.getClassName();
++        }
++        if (state.kindleInFront()) {
++            state.reader = state.topClass.endsWith("ReaderActivity");
++            state.home = KINDLE_HOME.equals(state.topClass);
++            readWindows(displayId, state);
++        }
++        cachedState = state;
++        cachedStateTime = SystemClock.uptimeMillis();
++        cachedStateDisplayId = displayId;
++        return state;
++    }
++
++    private static final Pattern WINDOW_HEADER = Pattern.compile("^  Window #\\d+ Window\\{[0-9a-f]+ u\\d+ (.*)\\}:$");
++    private static final Pattern DISPLAY_ID = Pattern.compile("mDisplayId=(\\d+)");
++    private static final Pattern PACKAGE = Pattern.compile(" package=(\\S+)");
++    private static final Pattern TYPE = Pattern.compile(" ty=([A-Z_]+)");
++
++    /** Reads Kindle's windows on the display from `dumpsys window windows` (about 25 ms). */
++    private static void readWindows(int displayId, State state) {
++        String title = null;
++        int windowDisplayId = -1;
++        String pkg = null;
++        String type = null;
++        boolean visible = false;
++        boolean barsHidden = false;
++        try {
++            Process process = new ProcessBuilder("dumpsys", "window", "windows").redirectErrorStream(true).start();
++            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
++            String line;
++            while ((line = reader.readLine()) != null) {
++                // A window's details are indented by 4 spaces, under a 2-space "Window #N" header
++                Matcher header = WINDOW_HEADER.matcher(line);
++                if (header.matches() || !line.startsWith("    ")) {
++                    if (title != null) {
++                        applyWindow(displayId, state, title, windowDisplayId, pkg, type, visible, barsHidden);
++                    }
++                    title = header.matches() ? header.group(1) : null;
++                    windowDisplayId = -1;
++                    pkg = null;
++                    type = null;
++                    visible = false;
++                    barsHidden = false;
++                    continue;
++                }
++                if (title == null) {
++                    continue;
++                }
++                Matcher m;
++                if (windowDisplayId == -1 && (m = DISPLAY_ID.matcher(line)).find()) {
++                    windowDisplayId = Integer.parseInt(m.group(1));
++                }
++                if (pkg == null && (m = PACKAGE.matcher(line)).find()) {
++                    pkg = m.group(1);
++                }
++                if (type == null && (m = TYPE.matcher(line)).find()) {
++                    type = m.group(1);
++                }
++                if (line.trim().equals("isVisible=true")) {
++                    visible = true;
++                }
++                if (line.contains("Requested non-default-visibility types:") && line.contains("statusBars")) {
++                    barsHidden = true;
++                }
++            }
++            if (title != null) {
++                applyWindow(displayId, state, title, windowDisplayId, pkg, type, visible, barsHidden);
++            }
++            process.waitFor();
++        } catch (Exception e) {
++            Ln.w("Kindle: could not read windows: " + e.getMessage());
++        }
++    }
++
++    private static void applyWindow(int displayId, State state, String title, int windowDisplayId, String pkg, String type, boolean visible,
++            boolean barsHidden) {
++        if (windowDisplayId != displayId || !visible || !KINDLE.equals(pkg) || type == null) {
++            return;
++        }
++        if (type.equals("BASE_APPLICATION")) {
++            if (state.reader && title.equals(KINDLE + "/" + state.topClass)) {
++                state.toolbarOpen = !barsHidden;
++            }
++        } else if (!type.equals("APPLICATION_STARTING") && !type.equals("TOAST")) {
++            state.overlay = true;
++        }
++    }
++
++    private static Object activityTaskManager;
++    private static Method getTasksMethod;
++    private static boolean getTasksTakesDisplay;
++    private static Field taskDisplayIdField;
++
++    /** The activity on top of the display, from Android's activity task manager. */
++    private static ComponentName getTopActivity(int displayId) {
++        try {
++            if (activityTaskManager == null) {
++                IBinder binder = (IBinder) Class.forName("android.os.ServiceManager").getMethod("getService", String.class)
++                        .invoke(null, "activity_task");
++                activityTaskManager = Class.forName("android.app.IActivityTaskManager$Stub").getMethod("asInterface", IBinder.class)
++                        .invoke(null, binder);
++                try {
++                    getTasksMethod = activityTaskManager.getClass().getMethod("getTasks", int.class, boolean.class, boolean.class, int.class);
++                    getTasksTakesDisplay = true;
++                } catch (NoSuchMethodException e) {
++                    getTasksMethod = activityTaskManager.getClass().getMethod("getTasks", int.class, boolean.class, boolean.class);
++                }
++                taskDisplayIdField = Class.forName("android.app.TaskInfo").getField("displayId");
++            }
++            List<?> tasks = getTasksTakesDisplay
++                    ? (List<?>) getTasksMethod.invoke(activityTaskManager, 10, false, false, displayId)
++                    : (List<?>) getTasksMethod.invoke(activityTaskManager, 10, false, false);
++            if (tasks == null) {
++                return null;
++            }
++            for (Object task : tasks) {
++                if (taskDisplayIdField.getInt(task) == displayId) {
++                    return (ComponentName) task.getClass().getField("topActivity").get(task);
++                }
++            }
++        } catch (Exception e) {
++            Ln.w("Kindle: could not read the top activity: " + e);
++        }
++        return null;
++    }
++}
 diff --git i/server/src/main/java/com/genymobile/scrcpy/video/CaptureControl.java w/server/src/main/java/com/genymobile/scrcpy/video/CaptureControl.java
 index 7933ea7..a2231d7 100644
 --- i/server/src/main/java/com/genymobile/scrcpy/video/CaptureControl.java

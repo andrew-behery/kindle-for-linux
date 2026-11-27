@@ -15,7 +15,9 @@ This runs Amazon's own Android app, unmodified, with no DRM removal:
 
 Kindle's window comes from [scrcpy](https://github.com/Genymobile/scrcpy): Android draws Kindle on
 a virtual screen that follows the window, so Kindle fills it whether it's tiled, side by side or
-fullscreen, with sharp text on scaled displays.
+fullscreen, with sharp text on scaled displays. And it works like a desktop app: the mouse wheel and
+the keyboard turn pages, Ctrl+F searches, right-click opens Kindle's menu for a word, Esc closes
+menus (see [Use](#use)).
 
 *Not affiliated with Amazon. Kindle is a trademark of Amazon.com, Inc.*
 
@@ -25,7 +27,7 @@ Install the package for your distro from the [Releases](https://github.com/andre
 
 **Arch Linux:**
 ```sh
-curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.5/kindle-for-linux-0.1.5-1-any.pkg.tar.zst -o /tmp/kindle-for-linux.pkg.tar.zst
+curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.6/kindle-for-linux-0.1.6-1-any.pkg.tar.zst -o /tmp/kindle-for-linux.pkg.tar.zst
 sudo pacman -U /tmp/kindle-for-linux.pkg.tar.zst
 kindle-for-linux --setup
 ```
@@ -33,20 +35,20 @@ kindle-for-linux --setup
 
 **Debian, Ubuntu, Linux Mint:**
 ```sh
-curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.5/kindle-for-linux_0.1.5_all.deb -o /tmp/kindle-for-linux.deb
+curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.6/kindle-for-linux_0.1.6_all.deb -o /tmp/kindle-for-linux.deb
 sudo apt install /tmp/kindle-for-linux.deb
 kindle-for-linux --setup
 ```
 
 **Fedora:**
 ```sh
-sudo dnf install https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.5/kindle-for-linux-0.1.5-1.noarch.rpm
+sudo dnf install https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.6/kindle-for-linux-0.1.6-1.noarch.rpm
 kindle-for-linux --setup
 ```
 
 **openSUSE:**
 ```sh
-curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.5/kindle-for-linux-0.1.5-1.noarch.rpm -o /tmp/kindle-for-linux.rpm
+curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.6/kindle-for-linux-0.1.6-1.noarch.rpm -o /tmp/kindle-for-linux.rpm
 sudo zypper install /tmp/kindle-for-linux.rpm
 kindle-for-linux --setup
 ```
@@ -90,13 +92,15 @@ Downloads are checksum-verified. Google's emulator and image come under the
 reopens with your library. Ctrl+V pastes there (from a password manager, say). To sign in again
 later, use the menu entry's **Sign in to Amazon** action or `kindle --sign-in`.
 
-Amazon marks its sign-in page as secure, and Android blanks secure pages out of screen captures,
-which is what Kindle's window shows. So for signing in, Kindle's window uses scrcpy's own server
-with one change ([`scrcpy-server/secure-display.patch`](scrcpy-server/secure-display.patch), built
-from scrcpy's tagged source by [`scrcpy-server/build.sh`](scrcpy-server/build.sh)): it runs as
-Android's system user and marks its screen secure (on the emulator via `adb root`; on Waydroid,
-where `adb root` is disabled, as an on-demand `init` service in Waydroid's read-only system
-overlay). The system user can't use Android's clipboard, so this is only used until you're signed
+Kindle's window uses scrcpy's own server with a few changes
+([`scrcpy-server/secure-display.patch`](scrcpy-server/secure-display.patch), built from scrcpy's
+tagged source by [`scrcpy-server/build.sh`](scrcpy-server/build.sh)): Kindle's desktop keys and mouse
+buttons (`KindleInput.java`, see [Use](#use)), a fix for fast window resizes on Android 14/15, and a
+secure screen for signing in. Amazon marks its sign-in page as secure, and Android blanks secure
+pages out of screen captures, which is what Kindle's window shows. So for signing in, the server
+runs as Android's system user and marks its screen secure (on the emulator via `adb root`; on
+Waydroid, where `adb root` is disabled, as an on-demand `init` service in Waydroid's read-only
+system overlay). The system user can't use Android's clipboard, so that's only until you're signed
 in. Where it isn't possible, signing in happens in a separate window showing Android's own screen.
 
 Already have the Kindle APK? `kindle-for-linux --setup --apk kindle.apk` (or `./install.sh --apk kindle.apk`) uses it instead (same checks).
@@ -109,7 +113,20 @@ Open **Kindle** from your app menu, or run `kindle` (`kindle-for-linux` when ins
   Android stays loaded but paused while Kindle is closed, so it reopens in about a second.
 - Kindle is light or dark like your desktop, and switches when your desktop does. It's read from
   the desktop portal, so it works on GNOME, KDE, Hyprland, Sway and others.
-- Copy and paste work between Kindle and your other apps (Ctrl+C / Ctrl+V). Right-click is Back.
+- Kindle takes desktop keys and mouse buttons:
+
+  | | |
+  |---|---|
+  | Ctrl+F | Search your library, or the book you're reading |
+  | Mouse wheel, Page Up / Page Down, arrow keys, Space / Shift+Space | Turn pages in a book, one per key press or wheel flick |
+  | Right-click | Kindle's menu for what's under the pointer: in a book, select the word (highlight, note, copy, dictionary); drag with the right button held to select more |
+  | Esc | Close what's open: a menu or dialog, the book's toolbar, a selection, search. It never closes your book |
+  | Mouse back button | Back |
+  | Shift+wheel | Scroll sideways (the rows of covers on Home) |
+  | F11 | Fullscreen |
+  | Ctrl+C / Ctrl+V | Copy and paste between Kindle and your other apps |
+
+  Click the left or right edge of a page to turn it, or the middle for the book's toolbar.
 - Everything in Kindle is sized like your other apps. For smaller or larger text and buttons
   everywhere (even smaller than Kindle's smallest font slider), set a density:
   `kindle --density 110` (or `200` for larger; the default is 160 × your display's scale, and

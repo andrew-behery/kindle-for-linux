@@ -488,8 +488,22 @@ open_kindle() { # $1 = auto (sign in first if Kindle isn't signed in yet) or sig
       screen=(--new-display=/"$density" --flex-display)
     fi
     # Android 15 (and Waydroid's fixed sign-in screen) would reserve a strip for system bars;
-    # Kindle has its own back buttons (and right-click is Back).
+    # Kindle has its own back buttons (and the mouse's back button is Back).
     [[ $BACKEND != emulator && $mode != sign-in ]] || extra+=(--no-vd-system-decorations)
+    # Desktop mouse buttons (scrcpy's defaults are made for phones: middle-click is Home, which leaves
+    # Kindle and closes its window; the side buttons open recent apps and the notification shade):
+    # right-click goes to our server, which makes it a press and hold where the pointer is (Kindle's
+    # menu for a word or a book, see scrcpy-server/secure-display.patch; with another server it's
+    # Back); middle-click does nothing; the back button is Back; the forward button does nothing.
+    if [[ $mode == sign-in ]] || ((use_patched_server)); then
+      extra+=(--mouse-bind=+-b-)
+    elif "$sbin" --help 2>/dev/null | grep -q -- '--mouse-bind'; then
+      extra+=(--mouse-bind=b-b-)
+    fi
+    # scrcpy's own shortcuts move from Alt (where Alt+arrows rotate the picture, Alt+P blanks Android's
+    # screen and Alt+H leaves Kindle) to Right Super, which nobody presses by accident. F11 still
+    # toggles fullscreen.
+    extra+=(--shortcut-mod=rsuper)
     # H.264 requires even dimensions, so odd tiled window widths (e.g. 941 px) get rounded down by
     # 1 px and blurred across the screen; default 8M/10s I-frames also leave static text soft
     # after transitions. VP8 allows 1x1 alignment (1:1 pixels) with crisp static keyframes; 30 fps
