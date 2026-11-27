@@ -25,7 +25,7 @@ Install the package for your distro from the [Releases](https://github.com/andre
 
 **Arch Linux:**
 ```sh
-curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.4/kindle-for-linux-0.1.4-1-any.pkg.tar.zst -o /tmp/kindle-for-linux.pkg.tar.zst
+curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.5/kindle-for-linux-0.1.5-1-any.pkg.tar.zst -o /tmp/kindle-for-linux.pkg.tar.zst
 sudo pacman -U /tmp/kindle-for-linux.pkg.tar.zst
 kindle-for-linux --setup
 ```
@@ -33,20 +33,20 @@ kindle-for-linux --setup
 
 **Debian, Ubuntu, Linux Mint:**
 ```sh
-curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.4/kindle-for-linux_0.1.4_all.deb -o /tmp/kindle-for-linux.deb
+curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.5/kindle-for-linux_0.1.5_all.deb -o /tmp/kindle-for-linux.deb
 sudo apt install /tmp/kindle-for-linux.deb
 kindle-for-linux --setup
 ```
 
 **Fedora:**
 ```sh
-sudo dnf install https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.4/kindle-for-linux-0.1.4-1.noarch.rpm
+sudo dnf install https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.5/kindle-for-linux-0.1.5-1.noarch.rpm
 kindle-for-linux --setup
 ```
 
 **openSUSE:**
 ```sh
-curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.4/kindle-for-linux-0.1.4-1.noarch.rpm -o /tmp/kindle-for-linux.rpm
+curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.5/kindle-for-linux-0.1.5-1.noarch.rpm -o /tmp/kindle-for-linux.rpm
 sudo zypper install /tmp/kindle-for-linux.rpm
 kindle-for-linux --setup
 ```
@@ -120,12 +120,12 @@ Open **Kindle** from your app menu, or run `kindle` (`kindle-for-linux` when ins
 
 ## Requirements
 
-| | Waydroid | Emulator (NVIDIA-only computers) |
+| | Waydroid | Emulator (NVIDIA-only computers & VMs without 3D GPU) |
 |---|---|---|
-| CPU | x86_64 or ARM64 | x86_64 with virtualization (VT-x / AMD-V) turned on |
+| CPU | x86_64 or ARM64 | x86_64 with virtualization (VT-x / AMD-V / nested KVM) turned on |
 | Kernel | binder support (most distro kernels; Ubuntu/Debian: `linux-modules-extra`) | KVM (every distro kernel) |
-| GPU | AMD, Intel or ARM | any (Android draws in software on NVIDIA; fine for reading) |
-| RAM | 4 GB or more (Android uses ~1.3 GB) | 8 GB or more (the emulator holds ~3.5 GB) |
+| GPU | AMD, Intel, ARM or Virtio-GPU (VirGL) | any (uses host Vulkan GPU when available, or SwiftShader CPU rendering on NVIDIA and unaccelerated VMs) |
+| RAM | 4 GB or more (Android uses ~1.3 GB) | 6 GB or more recommended; 4 GB minimum (the emulator holds ~2.2–2.7 GB) |
 | Disk | ~5 GB on the system disk | ~7 GB in your home directory |
 
 A kernel without binder gets the emulator too. Desktop: Wayland or X11 (on Waydroid under X11,

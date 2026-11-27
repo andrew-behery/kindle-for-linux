@@ -124,47 +124,10 @@ mode=$(display_mode)
 # Which way Android runs (see lib.sh). Waydroid needs binder in the kernel and a GPU its Android
 # can draw with: it picks an AMD/Intel/ARM one by itself and skips NVIDIA or unaccelerated VM GPUs
 # (such as virtio_gpu without virgl 3D). Without one, Android/cage fails or draws on the CPU.
-virtio_has_3d() {
-  local node
-  for node in /sys/class/drm/renderD*; do
-    [[ -r $node/device/uevent ]] || continue
-    grep -qx 'DRIVER=virtio_gpu' "$node/device/uevent" || continue
-    # Linux's virtio core exposes negotiated feature bits (LSB-first) in sysfs; bit 0 is
-    # VIRTIO_GPU_F_VIRGL (3D acceleration). World-readable, no render-group or Python needed.
-    if [[ -r $node/device/features ]]; then
-      [[ $(<"$node/device/features") == 1* ]] && return 0
-      continue
-    fi
-    command -v python3 >/dev/null || continue
-    python3 -c '
-import ctypes, fcntl, os, struct, sys
-try:
-    fd = os.open(sys.argv[1], os.O_RDWR)
-    try:
-        val = ctypes.c_int(0)
-        buf = bytearray(struct.pack("QQ", 1, ctypes.addressof(val))) # VIRTGPU_PARAM_3D_FEATURES
-        fcntl.ioctl(fd, 0xc0106443, buf)                             # DRM_IOCTL_VIRTGPU_GETPARAM
-        sys.exit(0 if val.value else 1)
-    finally:
-        os.close(fd)
-except OSError:
-    sys.exit(1)
-' "/dev/dri/${node##*/}" 2>/dev/null && return 0
-  done
-  return 1
-}
 has_binder=0
 if grep -qw binder /proc/filesystems || modinfo binder_linux >/dev/null 2>&1; then has_binder=1; fi
-gpu_drivers=$(for f in /sys/class/drm/renderD*/device/uevent; do if [[ -r $f ]]; then sed -n 's/^DRIVER=//p' "$f"; fi; done | sort -u | xargs)
-waydroid_gpu=""
-for drv in $gpu_drivers; do
-  case $drv in
-    nvidia | bochs | bochs-drm | cirrus | qxl | vboxvideo | simpledrm | vkms | udl | evdi | vgem | hyperv_drm | ast | mgag200) continue ;;
-    virtio_gpu) virtio_has_3d || continue ;;
-  esac
-  waydroid_gpu=$drv
-  break
-done
+gpu_drivers=$(gpu_drivers_list)
+waydroid_gpu=$(waydroid_gpu_driver || true)
 if [[ -n ${KINDLE_BACKEND:-} ]]; then
   BACKEND=$KINDLE_BACKEND
 elif [[ -n $waydroid_gpu && $has_binder == 1 ]] || [[ $arch == aarch64 ]]; then
@@ -188,8 +151,16 @@ case $BACKEND in
     ;;
   emulator)
     [[ $arch == x86_64 ]] || die "The Android emulator needs an x86_64 computer."
-    [[ -e /dev/kvm ]] || die "The Android emulator needs hardware virtualization (KVM), and /dev/kvm is missing.
-  Turn on virtualization (Intel VT-x, AMD-V/SVM, or nested KVM in a VM) in your firmware/VM settings, then run this again."
+    if [[ ! -e /dev/kvm ]]; then
+      if in_vm; then
+        die "This virtual machine has neither /dev/kvm (nested virtualization) nor a 3D GPU for Waydroid (${gpu_drivers:-none}).
+  In your VM settings, either:
+  1. Enable nested virtualization (Intel VT-x / AMD-V) so the Android emulator can run, OR
+  2. Enable Virtio-GPU 3D acceleration (VirGL) with a binder-enabled Linux kernel so Waydroid can run."
+      fi
+      die "The Android emulator needs hardware virtualization (KVM), and /dev/kvm is missing.
+  Turn on virtualization (Intel VT-x or AMD-V/SVM) in your BIOS/UEFI firmware settings, then run this again."
+    fi
     ;;
   *) die "KINDLE_BACKEND must be waydroid or emulator." ;;
 esac
@@ -207,10 +178,13 @@ fi
 
 mem_gb=$(awk '/MemTotal/ { printf "%d", $2 / 1048576 + 0.5 }' /proc/meminfo)
 if [[ $BACKEND == emulator ]]; then
-  ((mem_gb >= 8)) || warn "This computer has ${mem_gb} GB of RAM. The emulator holds about 4 GB while Android runs."
+  ((mem_gb >= 6)) || warn "This computer has ${mem_gb} GB of RAM. The emulator holds about 2.5 GB while Android runs."
   mkdir -p "$DATA_HOME"
   free_gb=$(df -P "$DATA_HOME" | awk 'NR == 2 { printf "%d", $4 / 1048576 }')
-  [[ -d $EMU_SDK/emulator ]] || ((free_gb >= 12)) || die "The emulator needs about 12 GB free in $DATA_HOME; there's ${free_gb} GB."
+  if [[ ! -d $EMU_SDK/emulator ]]; then
+    ((free_gb >= 9)) || die "The emulator needs at least 9 GB free in $DATA_HOME; there's ${free_gb} GB."
+    ((free_gb >= 11)) || warn "Disk space in $DATA_HOME is tight (${free_gb} GB free)."
+  fi
 else
   ((mem_gb >= 4)) || warn "This computer has ${mem_gb} GB of RAM. Android needs about 1.5 GB of it while Kindle is open."
   free_gb=$(df -P /etc | awk 'NR == 2 { printf "%d", $4 / 1048576 }')
@@ -478,10 +452,19 @@ fi
 # --- ARM translation (x86_64 only) -------------------------------------------------------------
 
 # `waydroid init` clears Waydroid's overlay, where the translation libraries live, so check both
-# the setting and the files.
+# the setting and the files (accounting for /var/lib/waydroid being root-only 0700 on some distros).
+arm_overlay_present() {
+  local ov=/var/lib/waydroid/overlay/system
+  if [[ -r $ov && -x $ov ]]; then
+    find "$ov" \( -name 'libhoudini.so' -o -name 'libndk_translation.so' \) -print -quit 2>/dev/null | grep -q .
+  elif [[ -n $(state_get arm_layer) ]]; then
+    return 0
+  else
+    root find "$ov" \( -name 'libhoudini.so' -o -name 'libndk_translation.so' \) -print -quit 2>/dev/null | grep -q .
+  fi
+}
 if [[ $arch == x86_64 ]]; then
-  if grep -q 'native.bridge' "$WAYDROID_CFG" 2>/dev/null &&
-    find /var/lib/waydroid/overlay/system -name 'libhoudini.so' -o -name 'libndk_translation.so' 2>/dev/null | grep -q .; then
+  if grep -q 'native.bridge' "$WAYDROID_CFG" 2>/dev/null && arm_overlay_present; then
     note "ARM translation is already installed."
   else
     say "Adding ARM translation ($arm_layer)"
@@ -575,12 +558,13 @@ if [[ $BACKEND == emulator ]]; then
   mkdir -p "$ADB_HOME/.android"
   [[ -f $ADB_HOME/.android/adbkey ]] || kfl_adb keygen "$ADB_HOME/.android/adbkey" >/dev/null 2>&1
 
-  # The virtual device. 2.5 GB is ample once Google's background apps are off (Android then
-  # uses ~1.3 GB with Kindle open). No cameras or sensors. Its own screen only appears for
+  # The virtual device. 1.5-2 GB is ample once Google's background apps are off (Android then
+  # uses ~1 GB with Kindle open). No cameras or sensors. Its own screen only appears for
   # signing in (Kindle has its own window otherwise): a phone shape with large text, readable
   # even in a narrow tile.
   cores=$(nproc)
   ((cores <= 4)) || cores=4
+  ram_mb=$(avd_ram_mb)
   # Earlier versions named the device kindle-for-linux: keep its Android data under the new name.
   if [[ -d $EMU_AVD_HOME/kindle-for-linux.avd && ! -e $EMU_AVD_HOME/$EMU_AVD.avd ]]; then
     stop_android
@@ -596,7 +580,7 @@ avd.ini.encoding=UTF-8
 abi.type=x86_64
 hw.cpu.arch=x86_64
 hw.cpu.ncore=$cores
-hw.ramSize=2560
+hw.ramSize=$ram_mb
 disk.dataPartition.size=8G
 image.sysdir.1=$EMU_IMAGE_DIR/
 tag.id=google_apis
@@ -627,7 +611,7 @@ hw.sensors.humidity=no
 showDeviceFrame=no
 fastboot.forceColdBoot=yes
 EOF
-  note "Virtual device ready ($cores cores, 2.5 GB)."
+  note "Virtual device ready ($cores cores, $((ram_mb / 1024)).$(((ram_mb % 1024) * 10 / 1024)) GB)."
 fi
 
 # --- Android settings --------------------------------------------------------------------------
@@ -679,9 +663,18 @@ PYCFG
   # place the pinned server in Waydroid's system overlay as an init service started only on demand.
   if [[ -f $SCRCPY_DIR/scrcpy-server-secure ]]; then
     overlay=/var/lib/waydroid/overlay/system
-    if ! cmp -s "$SCRCPY_DIR/scrcpy-server-secure" "$overlay/framework/kfl-scrcpy-server.jar" ||
-      ! cmp -s "$here/scrcpy-server/kfl-scrcpy-server" "$overlay/bin/kfl-scrcpy-server" ||
-      ! cmp -s "$here/scrcpy-server/kfl-scrcpy.rc" "$overlay/etc/init/kfl-scrcpy.rc"; then
+    cmp_overlay() {
+      if [[ -r $overlay && -x $overlay ]]; then
+        cmp -s "$SCRCPY_DIR/scrcpy-server-secure" "$overlay/framework/kfl-scrcpy-server.jar" &&
+          cmp -s "$here/scrcpy-server/kfl-scrcpy-server" "$overlay/bin/kfl-scrcpy-server" &&
+          cmp -s "$here/scrcpy-server/kfl-scrcpy.rc" "$overlay/etc/init/kfl-scrcpy.rc"
+      else
+        # shellcheck disable=SC2016
+        root bash -c 'cmp -s "$1" "$4/framework/kfl-scrcpy-server.jar" && cmp -s "$2" "$4/bin/kfl-scrcpy-server" && cmp -s "$3" "$4/etc/init/kfl-scrcpy.rc"' \
+          _ "$SCRCPY_DIR/scrcpy-server-secure" "$here/scrcpy-server/kfl-scrcpy-server" "$here/scrcpy-server/kfl-scrcpy.rc" "$overlay"
+      fi
+    }
+    if ! cmp_overlay; then
       stop_android
       root install -Dm 644 "$SCRCPY_DIR/scrcpy-server-secure" "$overlay/framework/kfl-scrcpy-server.jar"
       root install -Dm 755 "$here/scrcpy-server/kfl-scrcpy-server" "$overlay/bin/kfl-scrcpy-server"
@@ -721,19 +714,7 @@ fi
 serial=$(android_connect 60) || die "Couldn't connect to Android with adb. Details: $LOG"
 adb_shell() { kfl_adb -s "$serial" shell "$@"; }
 
-if [[ $BACKEND == emulator && $(state_get android_trimmed) != 1 ]]; then
-  # Google's apps and services on this image keep working in the background, and Kindle needs
-  # none of them: switched off (not removed), Android uses ~400 MB less and idles quieter.
-  for pkg in com.google.android.gms com.google.android.gsf com.android.vending com.google.android.googlequicksearchbox \
-    com.google.android.apps.wellbeing com.google.android.as com.google.android.as.oss com.google.android.apps.messaging \
-    com.google.android.apps.maps com.google.android.apps.photos com.google.android.apps.docs \
-    com.google.android.apps.youtube.music com.google.android.gm com.google.android.calendar com.google.android.dialer \
-    com.google.android.contacts com.android.chrome com.google.android.apps.restore com.google.android.apps.safetyhub \
-    com.google.android.feedback com.google.android.partnersetup; do
-    adb_shell pm disable-user --user 0 "$pkg" >/dev/null 2>&1 || true
-  done
-  state_set android_trimmed 1
-fi
+ensure_emulator_trimmed "$serial"
 # These live in Android's data, so they survive restarts and image switches: set them once.
 # No window animations (pages and menus appear at once), and no
 # screen sleep, which would blank the page you're reading (Android is paused whenever Kindle's
@@ -741,10 +722,13 @@ fi
 tuned_key=android_tuned
 [[ $BACKEND == waydroid ]] || tuned_key=android_tuned_$BACKEND
 if [[ $(state_get "$tuned_key") != 2 ]]; then
-  for key in window_animation_scale transition_animation_scale animator_duration_scale; do
-    adb_shell settings put global "$key" 0 || warn "Couldn't set $key."
-  done
-  adb_shell settings put system screen_off_timeout 2147483647 || warn "Couldn't turn off screen sleep."
+  # shellcheck disable=SC2016
+  adb_shell '
+    for key in window_animation_scale transition_animation_scale animator_duration_scale; do
+      settings put global "$key" 0
+    done
+    settings put system screen_off_timeout 2147483647
+  ' || warn "Couldn't apply all Android display settings."
   state_set "$tuned_key" 2
 fi
 # Light or dark like the desktop (the launcher keeps them matched from then on).
@@ -828,21 +812,18 @@ fi
 # Kindle's phone layout (used when the window is under 600 px tall, or narrow) locks itself to
 # portrait, which leaves a wide window letterboxed: Kindle in a strip down the middle. Android's
 # compatibility overrides make it follow the window instead: whatever orientation Kindle asks
-# for becomes "the screen's own". They belong to Kindle's install, so set them every run.
-for change in OVERRIDE_ANY_ORIENTATION OVERRIDE_UNDEFINED_ORIENTATION_TO_NOSENSOR; do
-  adb_shell am compat enable "$change" "$KINDLE_PKG" >/dev/null ||
-    warn "Couldn't set $change: Kindle may show black bars in wide windows."
-done
-
-# Kindle asks for some Android permissions, and Android's question would appear where nobody can
-# see it (on Android's own screen, or blanked out of Kindle's window). Settle them up front:
-# notifications allowed (they never show anywhere), the rest (Bluetooth, phone state, storage:
-# nothing Kindle needs for reading) denied for good, so it doesn't ask.
-adb_shell pm grant "$KINDLE_PKG" android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true
-for perm in BLUETOOTH_CONNECT BLUETOOTH_SCAN BLUETOOTH_ADVERTISE READ_PHONE_STATE READ_EXTERNAL_STORAGE; do
-  adb_shell pm revoke "$KINDLE_PKG" "android.permission.$perm" >/dev/null 2>&1 || true
-  adb_shell pm set-permission-flags "$KINDLE_PKG" "android.permission.$perm" user-set user-fixed >/dev/null 2>&1 || true
-done
+# for becomes "the screen's own". Settle orientation overrides and runtime permissions in one
+# adb session so prompts never appear unseen on Android's hidden screen.
+adb_shell "
+  for change in OVERRIDE_ANY_ORIENTATION OVERRIDE_UNDEFINED_ORIENTATION_TO_NOSENSOR; do
+    am compat enable \"\$change\" '$KINDLE_PKG' >/dev/null || exit 1
+  done
+  pm grant '$KINDLE_PKG' android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true
+  for perm in BLUETOOTH_CONNECT BLUETOOTH_SCAN BLUETOOTH_ADVERTISE READ_PHONE_STATE READ_EXTERNAL_STORAGE; do
+    pm revoke '$KINDLE_PKG' \"android.permission.\$perm\" >/dev/null 2>&1 || true
+    pm set-permission-flags '$KINDLE_PKG' \"android.permission.\$perm\" user-set user-fixed >/dev/null 2>&1 || true
+  done
+" || warn "Couldn't set orientation overrides: Kindle may show black bars in wide windows."
 
 # --- Launcher ----------------------------------------------------------------------------------
 
@@ -862,8 +843,8 @@ else
   install -m 755 "$here/kindle" "$here/install.sh" "$here/uninstall.sh" "$here/verify.sh" "$APP_DIR/"
   install -m 644 "$here/lib.sh" "$here/apkcert.py" "$here/getkindle.py" "$here/apkicon.py" "$APP_DIR/"
   [[ ! -f $here/VERSION ]] || install -m 644 "$here/VERSION" "$APP_DIR/VERSION"
+  rm -f "$APP_DIR/adb-system"
   mkdir -p "$APP_DIR/scrcpy-server"
-  install -m 755 "$here/scrcpy-server/adb-system" "$APP_DIR/adb-system"
   install -m 755 "$here/scrcpy-server/adb-system" "$here/scrcpy-server/kfl-scrcpy-server" "$APP_DIR/scrcpy-server/"
   install -m 644 "$here/scrcpy-server/kfl-scrcpy.rc" "$here/scrcpy-server/scrcpy-server-secure" "$APP_DIR/scrcpy-server/"
   launcher=$APP_DIR/kindle

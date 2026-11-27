@@ -47,17 +47,25 @@ def signing_blocks(path):
         if eocd < 0:
             raise ValueError("not a zip/APK")
         (cd_offset,) = struct.unpack_from("<I", tail, eocd + 16)
+        if cd_offset == 0xFFFFFFFF:
+            raise ValueError("ZIP64 APK not supported")
+        if cd_offset < 32 or cd_offset > size:
+            raise ValueError("corrupt ZIP central directory offset")
         f.seek(cd_offset - 24)
         footer = f.read(24)
         if footer[8:] != MAGIC:
             raise ValueError("no APK Signing Block (only v1/JAR signing?)")
         (block_size,) = struct.unpack_from("<Q", footer, 0)
+        if block_size < 24 or block_size > 64 * 1024 * 1024 or block_size + 8 > cd_offset:
+            raise ValueError("invalid APK Signing Block size")
         f.seek(cd_offset - block_size - 8)
         block = f.read(block_size + 8)
     pairs = block[8:-24]
     off = 0
-    while off < len(pairs):
+    while off + 12 <= len(pairs):
         (n,) = struct.unpack_from("<Q", pairs, off)
+        if n < 4 or off + 8 + n > len(pairs):
+            raise ValueError("truncated APK Signing Block entry")
         (bid,) = struct.unpack_from("<I", pairs, off + 8)
         yield bid, pairs[off + 12 : off + 8 + n]
         off += 8 + n

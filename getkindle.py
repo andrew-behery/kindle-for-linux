@@ -9,6 +9,7 @@ are skipped). This only fetches: the caller checks the file with `apkcert.py --k
 certificate, Play build) and Android verifies its signatures when installing it.
 Exit 0 on success, 1 if nothing could be downloaded. Standard library only.
 """
+import gzip
 import html
 import http.cookiejar
 import os
@@ -25,16 +26,21 @@ TRIES = 3  # releases to try, newest first
 opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
 
-def fetch(url, referer=None):
+def fetch(url, referer=None, accept_gzip=False):
     headers = {"User-Agent": UA, "Accept-Language": "en-US,en;q=0.8"}
+    if accept_gzip:
+        headers["Accept-Encoding"] = "gzip"
     if referer:
         headers["Referer"] = referer
     return opener.open(urllib.request.Request(url, headers=headers), timeout=60)
 
 
 def page(url, referer=None):
-    with fetch(url, referer) as r:
-        return r.read().decode("utf-8", "replace")
+    with fetch(url, referer, accept_gzip=True) as r:
+        raw = r.read()
+        if r.headers.get("Content-Encoding", "").lower() == "gzip":
+            raw = gzip.decompress(raw)
+        return raw.decode("utf-8", "replace")
 
 
 def releases():
@@ -57,7 +63,7 @@ def arm64_variant(release_path):
     for i, m in enumerate(links):
         end = links[i + 1].start() if i + 1 < len(links) else m.end() + 3000
         row = re.sub(r"<[^>]+>", " ", text[m.end():end])
-        if "arm64-v8a" in row and "BUNDLE" not in row:
+        if "arm64-v8a" in row and "bundle" not in row.lower():
             return version, m.group(1)
     return version, None
 
@@ -72,13 +78,20 @@ def download(variant_path, out):
     if not m:
         raise RuntimeError("no file link")
     part = out + ".part"
-    with fetch(BASE + html.unescape(m.group(1)), download_url) as r, open(part, "wb") as f:
-        kind = r.headers.get("Content-Type", "")
-        if "android.package-archive" not in kind and "octet-stream" not in kind:
-            raise RuntimeError(f"unexpected file type {kind!r}")
-        while chunk := r.read(1 << 20):
-            f.write(chunk)
-    os.replace(part, out)
+    try:
+        with fetch(BASE + html.unescape(m.group(1)), download_url) as r, open(part, "wb") as f:
+            kind = r.headers.get("Content-Type", "")
+            if "android.package-archive" not in kind and "octet-stream" not in kind:
+                raise RuntimeError(f"unexpected file type {kind!r}")
+            while chunk := r.read(1 << 20):
+                f.write(chunk)
+        os.replace(part, out)
+    except BaseException:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        raise
 
 
 def main():

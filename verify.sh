@@ -12,7 +12,17 @@ here=$(dirname "$(readlink -f "$0")")
 source "$here/lib.sh"
 
 bench=0
-[[ ${1:-} == --bench ]] && bench=1
+while (($#)); do
+  case $1 in
+    --bench) bench=1 ;;
+    --help | -h)
+      printf 'Usage: %s [--bench]\n' "${0##*/}"
+      exit 0
+      ;;
+    *) die "unknown option: $1 (try --help)" ;;
+  esac
+  shift
+done
 fails=0
 ok() { printf '  \033[32mok\033[0m    %s\n' "$*"; }
 bad() {
@@ -34,6 +44,8 @@ if [[ $BACKEND == waydroid ]]; then
     images_path=$(sed -n 's/^images_path = //p' "$WAYDROID_CFG")
     if [[ $images_path == /etc/waydroid-extra/images && -f $images_path/kindle-for-linux.version ]]; then
       ok "Android images: $(<"$images_path/kindle-for-linux.version") (pinned, no Google)"
+    elif [[ $(uname -m) == aarch64 && -n $images_path ]]; then
+      ok "Android images: $images_path (ARM64 VANILLA)"
     else
       bad "Android images aren't the pinned ones (images_path = ${images_path:-?}); rerun install.sh"
     fi
@@ -76,7 +88,13 @@ secure_srv=$here/scrcpy-server/scrcpy-server-secure
 adb_sys=$here/scrcpy-server/adb-system
 [[ -x $adb_sys ]] || adb_sys=$APP_DIR/adb-system
 if [[ $BACKEND == waydroid ]]; then
-  if [[ -f $secure_srv && -f /var/lib/waydroid/overlay/system/etc/init/kfl-scrcpy.rc && -x $adb_sys ]]; then
+  has_rc=0
+  if [[ -f /var/lib/waydroid/overlay/system/etc/init/kfl-scrcpy.rc ]] ||
+    { ((${#R[@]})) && "${R[@]}" test -f /var/lib/waydroid/overlay/system/etc/init/kfl-scrcpy.rc 2>/dev/null; } ||
+    [[ $(state_get waydroid_signin_service) == 1 ]]; then
+    has_rc=1
+  fi
+  if [[ -f $secure_srv && $has_rc == 1 && -x $adb_sys ]]; then
     ok "sign-in service in Waydroid's overlay (Amazon sign-in shows in Kindle's window)"
   else
     info "no sign-in overlay service: signing in uses a separate window"
@@ -130,7 +148,7 @@ say "Memory and CPU"
 cpu_ticks() { awk '{ print $14 + $15 }' "/proc/$1/stat" 2>/dev/null || echo 0; }
 if [[ $BACKEND == waydroid ]]; then
   # Waydroid's container is an LXC payload cgroup: its counters cover all of Android.
-  cg=$(find /sys/fs/cgroup -maxdepth 3 -type d -name 'lxc.payload.waydroid' 2>/dev/null | head -n1 || true)
+  cg=$(wd_cgroup_dir || true)
   if [[ -n $cg && -r $cg/memory.current ]]; then
     # memory.current also counts file cache (Android's images, Kindle's books), which Linux drops
     # whenever it needs the room; anon + kernel is what Android itself holds.
@@ -158,6 +176,8 @@ fi
 
 if ((bench)); then
   say "Opening speed, resizing, close and reopen"
+  bench_launcher=$here/kindle
+  [[ -x $bench_launcher ]] || bench_launcher=$launcher
   # On Hyprland the window itself is watched and resized; elsewhere "open" is Kindle's first frame
   # in scrcpy's log, and the resize checks are skipped.
   hypr=0
@@ -169,13 +189,22 @@ if ((bench)); then
       echo shown
     fi
   }
-  launcher_pid() { pgrep -u "$UID" -f "^(/usr/bin/)?bash $launcher\$" | head -n1 || true; }
+  launcher_pid() {
+    local p cmd
+    for p in $(pgrep -u "$UID" -f "bash " 2>/dev/null || true); do
+      cmd=$({ tr '\0' ' ' <"/proc/$p/cmdline"; } 2>/dev/null || true)
+      if [[ $cmd == *"/bash $bench_launcher "* || $cmd == "bash $bench_launcher "* ]]; then
+        echo "$p"
+        return 0
+      fi
+    done
+  }
   # Android's crashes, from its dropbox (Java crashes, native tombstones, watchdog restarts),
   # plus host coredumps on Waydroid (shared kernel) and the emulator quitting on the emulator.
   crashes() {
     local n=0 was
     was=$(android_state)
-    [[ $was != FROZEN ]] || android_wake
+    [[ $was != FROZEN ]] || android_wake FROZEN
     n=$(kfl_adb -s "$(android_connect 20)" shell dumpsys dropbox 2>/dev/null | tr -d '\r' |
       awk -v since="$bench_start" '$1 " " $2 >= since && $3 ~ /^(system_server_crash|system_server_watchdog|SYSTEM_TOMBSTONE|data_app_crash|data_app_native_crash|system_app_crash)$/' | wc -l)
     [[ $was != FROZEN ]] || android_sleep
@@ -190,7 +219,7 @@ if ((bench)); then
     local start deadline=$((SECONDS + 240))
     rm -f "$STATE_DIR/window.log"
     start=$(date +%s%N)
-    setsid -f "$launcher" >/dev/null 2>&1 </dev/null
+    setsid -f "$bench_launcher" >/dev/null 2>&1 </dev/null
     until [[ -n $(window) ]]; do
       ((SECONDS < deadline)) || {
         echo "timeout"
@@ -227,8 +256,12 @@ if ((bench)); then
     kfl_adb -s "$(android_connect 5)" shell dumpsys activity activities 2>/dev/null |
       awk -v pkg="$KINDLE_PKG/" '
         !done && index($0, pkg) { in_pkg = 1; n = 40 }
-        in_pkg && match($0, /mBounds=Rect\(0, 0 - ([0-9]+), ([0-9]+)\)/, m) {
-          out = m[1] " x " m[2]; done = 1; in_pkg = 0
+        in_pkg && /mBounds=Rect\(0, 0 - [0-9]+, [0-9]+\)/ {
+          s = $0
+          sub(/.*mBounds=Rect\(0, 0 - /, "", s)
+          sub(/\).*/, "", s)
+          sub(/, /, " x ", s)
+          out = s; done = 1; in_pkg = 0
         }
         in_pkg && --n <= 0 { in_pkg = 0 }
         END { print out }
@@ -250,7 +283,7 @@ if ((bench)); then
 
   bench_start=$(date '+%Y-%m-%d %H:%M:%S')
   close_kindle
-  "$launcher" --stop
+  "$bench_launcher" --stop
   info "open, Android stopped (cold):  $(time_open)"
   sleep 8
   if ((hypr)); then

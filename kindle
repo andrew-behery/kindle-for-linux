@@ -7,7 +7,7 @@
 #   kindle --status  show whether Android is running, paused or stopped
 # The window is scrcpy showing a virtual Android screen that resizes with it, so Kindle reflows
 # when the window is tiled, resized or made fullscreen. While the window is closed, Android stays
-# loaded but paused (no CPU use), so Kindle reopens in about a second.
+# loaded but paused (no CPU use), so Kindle reopens in under a second.
 set -euo pipefail
 here=$(dirname "$(readlink -f "$0")")
 # shellcheck source=lib.sh
@@ -32,7 +32,7 @@ fi
 STATE_DISPLAY=${STATE_DIR/#$HOME/\~}
 
 kfl_version() {
-  if [[ -r $here/VERSION ]]; then cat "$here/VERSION"; else echo dev; fi
+  if [[ -r $here/VERSION ]]; then printf '%s\n' "$(<"$here/VERSION")"; else echo dev; fi
 }
 
 usage() {
@@ -124,10 +124,10 @@ run_setup() {
 SECURE_SERVER=$here/scrcpy-server/scrcpy-server-secure
 [[ -f $SECURE_SERVER ]] || SECURE_SERVER=$SCRCPY_DIR/scrcpy-server-secure
 adb_system_bin() {
-  if [[ -x $here/adb-system ]]; then
-    echo "$here/adb-system"
-  elif [[ -x $here/scrcpy-server/adb-system ]]; then
+  if [[ -x $here/scrcpy-server/adb-system ]]; then
     echo "$here/scrcpy-server/adb-system"
+  elif [[ -x $here/adb-system ]]; then
+    echo "$here/adb-system"
   fi
 }
 
@@ -140,7 +140,7 @@ android_root() { # $1 = serial
   fi
   [[ $(kfl_adb -s "$s" shell getprop ro.debuggable 2>/dev/null | tr -d '\r') == 1 ]] || return 1
   kfl_adb -s "$s" root >/dev/null 2>&1 || return 1
-  sleep 2
+  sleep 1.5
   s=$(android_connect 30) || return 1
   [[ $(kfl_adb -s "$s" shell id -u 2>/dev/null | tr -d '\r') == 0 ]] || return 1
   echo "$s"
@@ -156,7 +156,9 @@ android_root() { # $1 = serial
 # exactly the size and density of the screen in Kindle's window, which stays that size until
 # you're signed in (the window scales it), and moves over unchanged.
 prepare_sign_in() { # $1 = density
-  [[ -f $SECURE_SERVER && $(scrcpy_bin) == "$SCRCPY_DIR/scrcpy" ]] || return 2
+  local sbin
+  sbin=$(scrcpy_bin)
+  [[ -f $SECURE_SERVER && ( $sbin == "$SCRCPY_DIR/scrcpy" || $("$sbin" --version 2>/dev/null | awk 'NR == 1 { print $2 }') == 5.0.1 ) ]] || return 2
   if [[ $BACKEND == emulator ]]; then
     serial=$(android_root "$serial") || return 2
   else
@@ -167,8 +169,10 @@ prepare_sign_in() { # $1 = density
   fi
   local launch rc=0
   sign_in_size="$((900 * $1 / 160))x$((1100 * $1 / 160))"
-  kfl_adb -s "$serial" shell am force-stop "$KINDLE_PKG" >/dev/null 2>&1 || true
-  kfl_adb -s "$serial" shell wm size "$sign_in_size" >/dev/null 2>&1 || true
+  kfl_adb -s "$serial" shell "
+    am force-stop '$KINDLE_PKG' >/dev/null 2>&1 || true
+    wm size '$sign_in_size' >/dev/null 2>&1 || true
+  " >/dev/null 2>&1 || true
   set_display0_density "$serial" "$1" 0
   kfl_adb -s "$serial" logcat -c >/dev/null 2>&1 || true # watch_sign_in reads what follows
   launch=$(kfl_adb -s "$serial" shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER "$KINDLE_PKG" | tr -d '\r' | tail -n1)
@@ -191,9 +195,11 @@ display0_density_info() { # $1 = serial
 # Sync Android display 0's density before starting Kindle: Kindle converts its book font size table
 # into raw pixels once at app startup (Application.onCreate) from display 0's metrics, then passes
 # PIXEL sizes to the reader, ignoring the virtual display's DPI for book body text.
-set_display0_density() { # $1 = serial, $2 = density, [$3 = force-stop Kindle if changed (1/0)]
-  local cur=0
-  read -r cur _ _ <<<"$(display0_density_info "$1")"
+set_display0_density() { # $1 = serial, $2 = density, [$3 = force-stop Kindle if changed (1/0)], [$4 = already-read cur density]
+  local cur=${4:-0}
+  if ((cur <= 0)); then
+    read -r cur _ _ <<<"$(display0_density_info "$1")"
+  fi
   [[ $cur =~ ^[0-9]+$ && $cur -eq $2 ]] && return 0
   if kfl_adb -s "$1" shell wm density "$2" >/dev/null 2>&1; then
     state_set display0_density "$2"
@@ -205,6 +211,13 @@ set_display0_density() { # $1 = serial, $2 = density, [$3 = force-stop Kindle if
 restore_main_screen() { # [$1 = keep-density]
   if [[ $BACKEND == emulator ]]; then
     kfl_adb -s "$serial" shell wm size 160x100 >/dev/null 2>&1 || true
+    # Drop root from sign-in mode so normal mode runs scrcpy's server as shell (uid 2000),
+    # preserving Android clipboard sync.
+    if [[ $(kfl_adb -s "$serial" shell id -u 2>/dev/null | tr -d '\r') == 0 ]]; then
+      kfl_adb -s "$serial" unroot >/dev/null 2>&1 || true
+      sleep 1
+      serial=$(android_connect 15) || true
+    fi
   else
     kfl_adb -s "$serial" shell wm size reset >/dev/null 2>&1 || true
   fi
@@ -214,35 +227,71 @@ restore_main_screen() { # [$1 = keep-density]
   fi
 }
 
+# Focused app on Android display $1 ("null" when empty).
+focused_app_on_display() { # $1 = display id
+  ADB_TIMEOUT=5 kfl_adb -s "$serial" shell dumpsys window displays 2>/dev/null | tr -d '\r' |
+    awk -v d="Display: mDisplayId=$1 " '
+      index($0, d) { in_d = 1; next }
+      in_d && /Display: mDisplayId=/ { in_d = 0 }
+      in_d && /mFocusedApp=/ { sub(/.*mFocusedApp=/, ""); app = $0 }
+      END { print app }
+    '
+}
+
 # Watch Kindle inside its virtual screen: if you back out of the app on Android, Android leaves
-# scrcpy's virtual screen empty, so scrcpy would keep showing the last frozen frame. Once Kindle
-# has been seen on that screen and then leaves it with no app left there, close scrcpy ($1).
+# scrcpy's virtual screen empty, so scrcpy would keep showing the last frozen frame. Uses Android's
+# event log rather than continuous polling, so reading a book costs zero CPU and zero dumpsys calls.
 watch_app() { # $1 = scrcpy pid, $2 = window log
-  local disp="" seen=0 gone=0 line app
+  local disp="" seen=0 app lpid="" fd="" line adb
+  adb=$(adb_bin)
+  # shellcheck disable=SC2329
+  _stop_watch() {
+    [[ -z $lpid ]] || kill "$lpid" 2>/dev/null || true
+    [[ -z $fd ]] || exec {fd}<&- 2>/dev/null || true
+  }
+  trap _stop_watch EXIT
+  trap 'exit 0' INT TERM HUP
+
+  while kill -0 "$1" 2>/dev/null && [[ -z $disp ]]; do
+    disp=$(sed -n 's/.*\[server\] INFO: New display: .* (id=\([0-9]*\)).*/\1/p' "$2" 2>/dev/null | tail -n1)
+    [[ -n $disp ]] || sleep 0.25
+  done
+  kill -0 "$1" 2>/dev/null || return 0
+
   while kill -0 "$1" 2>/dev/null; do
-    if [[ -z $disp ]]; then
-      disp=$(sed -n 's/.*\[server\] INFO: New display: .* (id=\([0-9]*\)).*/\1/p' "$2" 2>/dev/null | tail -n1)
+    app=$(focused_app_on_display "$disp")
+    if [[ $app == *"$KINDLE_PKG/"* ]]; then
+      seen=1
+      break
     fi
-    if [[ -n $disp ]]; then
-      app=$(ADB_TIMEOUT=5 kfl_adb -s "$serial" shell dumpsys window displays 2>/dev/null | tr -d '\r' |
-        awk -v d="Display: mDisplayId=$disp " '
-          index($0, d) { in_d = 1; next }
-          in_d && /Display: mDisplayId=/ { in_d = 0 }
-          in_d && /mFocusedApp=/ { sub(/.*mFocusedApp=/, ""); app = $0 }
-          END { print app }
-        ')
+    sleep 0.5
+  done
+
+  while kill -0 "$1" 2>/dev/null; do
+    exec {fd}< <(exec env HOME="$ADB_HOME" "$adb" -s "$serial" logcat -b events -T 1 \
+      wm_on_paused_called:I wm_finish_activity:I wm_task_removed:I wm_focused_activity:I am_proc_died:I '*:S' \
+      2>/dev/null 9>&-)
+    lpid=$!
+    while IFS= read -r -u "$fd" line; do
+      kill -0 "$1" 2>/dev/null || return 0
+      [[ -n $line && $line != ---------* ]] || continue
+      app=$(focused_app_on_display "$disp")
       if [[ $app == *"$KINDLE_PKG/"* ]]; then
         seen=1
-        gone=0
       elif ((seen)) && [[ $app == null ]]; then
-        gone=$((gone + 1))
-        if ((gone >= 2)); then
+        sleep 0.35
+        if [[ $(focused_app_on_display "$disp") == null ]]; then
           kill "$1" 2>/dev/null || true
-          return
+          return 0
         fi
       fi
-    fi
-    sleep 2
+    done
+    exec {fd}<&- 2>/dev/null || true
+    fd=""
+    wait "$lpid" 2>/dev/null || true
+    lpid=""
+    kill -0 "$1" 2>/dev/null || return 0
+    sleep 1
   done
 }
 
@@ -283,19 +332,19 @@ watch_sign_in() { # $1 = scrcpy pid
 
 open_kindle() { # $1 = auto (sign in first if Kindle isn't signed in yet) or sign-in
   mkdir -p "$STATE_DIR"
-  local log=$STATE_DIR/window.log rc=0 density scale="" big=() mode=normal
+  local log=$STATE_DIR/window.log rc=0 density=0 scale="" big=() mode=normal dmode sbin abin
   serial="" sign_in_size=""
   # One Kindle window at a time: a second one would open a second virtual screen. Waiting a few
-  # seconds lets a window that is just closing finish (it pauses Android on its way out).
+  # seconds lets a window that is just closing finish.
   exec 9>"$STATE_DIR/window.lock"
   flock -w 5 9 || exit 0
 
   case $(android_state) in
     STOPPED)
-      notify "Starting Kindle…" "The first time after you log in, this takes about half a minute."
+      notify "Starting Kindle…" "The first time after you log in, this takes about 20 seconds."
       start_android 240 || fail "Kindle couldn't start Android." "Details are in $STATE_DISPLAY."
       ;;
-    FROZEN) android_wake ;;
+    FROZEN) android_wake FROZEN ;;
   esac
   if ! serial=$(android_connect 15); then
     # Android is up but unreachable: after its core restarts (a crash), Waydroid's Android can
@@ -305,6 +354,7 @@ open_kindle() { # $1 = auto (sign in first if Kindle isn't signed in yet) or sig
     start_android 240 || fail "Kindle couldn't restart Android." "Details are in $STATE_DISPLAY."
     serial=$(android_connect 60) || fail "Kindle can't reach Android." "Run \"$CMD --stop\", then open Kindle again."
   fi
+  ensure_emulator_trimmed "$serial"
   hide_waydroid_entry
   # Light or dark like the desktop (also followed live while the window is open, below).
   match_color_scheme "$serial"
@@ -315,20 +365,27 @@ open_kindle() { # $1 = auto (sign in first if Kindle isn't signed in yet) or sig
   # the compositor: an override set with `wm density` wins. The emulator can't see the desktop,
   # so the scale is asked of the compositor; when that's unknown, the window stays in logical
   # pixels (right size, less sharp on scaled screens). KINDLE_DENSITY overrides either way.
-  local owned_density="" over_d=0 phys_d=0
+  local owned_density="" cur_d=0 over_d=0 phys_d=0
+  dmode=$(display_mode)
   owned_density=$(state_get display0_density)
-  if [[ $BACKEND == emulator || $(display_mode) == x11 ]]; then
+  if [[ $BACKEND == emulator || $dmode == x11 ]]; then
     scale=$(display_scale || true)
-    density=$(awk -v s="${scale:-1}" 'BEGIN { print int(160 * s + 0.5) }')
+    if [[ -z $scale || $scale == 1 ]]; then
+      density=160
+    elif [[ $scale == 2 ]]; then
+      density=320
+    else
+      density=$(awk -v s="$scale" 'BEGIN { print int(160 * s + 0.5) }')
+    fi
   else
     scale=waydroid
-    read -r _ over_d phys_d <<<"$(display0_density_info "$serial")"
+    read -r cur_d over_d phys_d <<<"$(display0_density_info "$serial")"
     # Ignore an Override that this launcher set itself, so compositor scale changes and
     # `--density reset` still follow Physical density while keeping manual `wm density` overrides.
     if ((over_d > 0)) && [[ $over_d != "$owned_density" ]]; then
       density=$over_d
     elif ((phys_d > 0)); then
-      density=$(awk -v p="$phys_d" 'BEGIN { print int(p * 160 / 180 + 0.5) }')
+      density=$(((phys_d * 160 + 90) / 180))
     fi
   fi
   [[ $density =~ ^[0-9]+$ && $density -gt 0 ]] || density=160
@@ -337,12 +394,13 @@ open_kindle() { # $1 = auto (sign in first if Kindle isn't signed in yet) or sig
   [[ $saved_density =~ ^[0-9]+$ && $saved_density -gt 0 ]] && density=$saved_density
   [[ ${KINDLE_DENSITY:-} =~ ^[0-9]+$ && ${KINDLE_DENSITY:-0} -gt 0 ]] && density=$KINDLE_DENSITY # bigger = larger text and buttons
   # Sized in real pixels, so on a scaled display Android draws at full resolution (sharp text).
-  [[ -z $scale || $(display_mode) == x11 ]] || big=(SDL_VIDEO_WAYLAND_SCALE_TO_DISPLAY=1)
+  [[ -z $scale || $dmode == x11 ]] || big=(SDL_VIDEO_WAYLAND_SCALE_TO_DISPLAY=1)
 
   if [[ $1 == sign-in || $(state_get "signed_in_$BACKEND") != 1 ]]; then
     local prep=0
     notify "Opening Amazon's sign-in page…"
     prepare_sign_in "$density" || prep=$?
+    cur_d=0
     case $prep in
       0) mode=sign-in ;;
       1)
@@ -351,7 +409,7 @@ open_kindle() { # $1 = auto (sign in first if Kindle isn't signed in yet) or sig
         [[ $1 != sign-in ]] || notify "You're already signed in to Amazon."
         ;;
       2)
-        # No secure screen possible here (no root, or the distro's scrcpy): sign in in a window
+        # No secure screen possible here (no root, or incompatible scrcpy): sign in in a window
         # showing Android's own screen instead.
         exec 9>&-
         sign_in_window
@@ -361,16 +419,46 @@ open_kindle() { # $1 = auto (sign in first if Kindle isn't signed in yet) or sig
   fi
 
   follow_color_scheme "$serial" 9>&- &
-  local color_pid=$!
-  # Once the window closes: stop following (the PID is filled in now; the trap runs after this
-  # function has returned), and pause Android. The pause lets scrcpy finish removing its screen.
-  # shellcheck disable=SC2064
-  trap "pkill -P $color_pid 2>/dev/null || true; kill $color_pid 2>/dev/null || true; sleep 2; android_sleep || true" EXIT
+  _kfl_color_pid=$!
+  _kfl_scrcpy_pid=""
+  _kfl_watcher_pid=""
+  # Once the window closes (or on logout/SIGTERM): stop helpers and scrcpy cleanly, wait briefly
+  # for Android to remove the virtual screen, then pause Android so it uses zero CPU.
+  # shellcheck disable=SC2329
+  _cleanup_window() {
+    if [[ -n ${_kfl_watcher_pid:-} ]]; then
+      pkill -P "$_kfl_watcher_pid" 2>/dev/null || true
+      kill "$_kfl_watcher_pid" 2>/dev/null || true
+    fi
+    if [[ -n ${_kfl_color_pid:-} ]]; then
+      pkill -P "$_kfl_color_pid" 2>/dev/null || true
+      kill "$_kfl_color_pid" 2>/dev/null || true
+    fi
+    if [[ -n ${_kfl_scrcpy_pid:-} ]] && kill -0 "$_kfl_scrcpy_pid" 2>/dev/null; then
+      kill "$_kfl_scrcpy_pid" 2>/dev/null || true
+      wait "$_kfl_scrcpy_pid" 2>/dev/null || true
+    fi
+    sleep 0.2
+    android_sleep || true
+  }
+  trap _cleanup_window EXIT
+  trap 'exit 143' TERM HUP
+  trap 'exit 130' INT
 
-  local server=() extra=() adb_env=() screen pid reopen started drops=0 watcher=""
+  sbin=$(scrcpy_bin)
+  abin=$(adb_bin)
+  local has_hwdec=0 use_patched_server=0
+  if [[ $sbin == "$SCRCPY_DIR/scrcpy" ]] || "$sbin" --help 2>/dev/null | grep -q -- '--hwdec'; then
+    has_hwdec=1
+  fi
+  if [[ -f $SECURE_SERVER && ( $sbin == "$SCRCPY_DIR/scrcpy" || $("$sbin" --version 2>/dev/null | awk 'NR == 1 { print $2 }') == 5.0.1 ) ]]; then
+    use_patched_server=1
+  fi
+
+  local server=() extra=() adb_env=() screen reopen started drops=0 rdriver sw_retried=0
   : >"$log" # this window's log; a reconnect (below) adds to it
   while :; do
-    server=() extra=() adb_env=(HOME="$ADB_HOME" ADB="$(adb_bin)")
+    server=() extra=() adb_env=(HOME="$ADB_HOME" ADB="$abin")
     rm -f "$STATE_DIR/reopen"
     if [[ $mode == sign-in ]]; then
       server=(SCRCPY_SERVER_PATH="$SECURE_SERVER")
@@ -380,15 +468,23 @@ open_kindle() { # $1 = auto (sign in first if Kindle isn't signed in yet) or sig
       screen=(--new-display="$sign_in_size/$density")
       extra=(--legacy-paste)
       if [[ $BACKEND == waydroid ]]; then
-        adb_env=(HOME="$ADB_HOME" ADB="$(adb_system_bin)" REAL_ADB="$(adb_bin)")
+        adb_env=(HOME="$ADB_HOME" ADB="$(adb_system_bin)" REAL_ADB="$abin")
         extra+=(--no-cleanup)
         notify "Sign in to Amazon" "Click \"Sign In with Amazon\", then sign in. Once you're signed in, Kindle opens your library."
       else
         notify "Sign in to Amazon" "Once you're signed in, Kindle opens your library."
       fi
     else
-      set_display0_density "$serial" "$density" 1
-      [[ ! -f $SCRCPY_DIR/scrcpy-server ]] || server=(SCRCPY_SERVER_PATH="$SCRCPY_DIR/scrcpy-server")
+      set_display0_density "$serial" "$density" 1 "$cur_d"
+      cur_d=$density
+      if ((use_patched_server)); then
+        # As non-root (uid 2000), scrcpy-server-secure behaves identically to the official server
+        # (including full clipboard sync) while carrying our Android 14/15 Codec2 flex-display
+        # rapid-resize fix.
+        server=(SCRCPY_SERVER_PATH="$SECURE_SERVER")
+      elif [[ -f $SCRCPY_DIR/scrcpy-server ]]; then
+        server=(SCRCPY_SERVER_PATH="$SCRCPY_DIR/scrcpy-server")
+      fi
       screen=(--new-display=/"$density" --flex-display)
     fi
     # Android 15 (and Waydroid's fixed sign-in screen) would reserve a strip for system bars;
@@ -396,42 +492,53 @@ open_kindle() { # $1 = auto (sign in first if Kindle isn't signed in yet) or sig
     [[ $BACKEND != emulator && $mode != sign-in ]] || extra+=(--no-vd-system-decorations)
     # H.264 requires even dimensions, so odd tiled window widths (e.g. 941 px) get rounded down by
     # 1 px and blurred across the screen; default 8M/10s I-frames also leave static text soft
-    # after transitions. VP8 allows 1x1 alignment (1:1 pixels) with crisp static keyframes (16M
-    # stays within Android's 20M slow-cpu VP8 encoder cap).
-    extra+=(--video-codec="${KINDLE_VIDEO_CODEC:-vp8}" --video-bit-rate="${KINDLE_BIT_RATE:-16M}" --video-codec-options=i-frame-interval=1)
+    # after transitions. VP8 allows 1x1 alignment (1:1 pixels) with crisp static keyframes; 30 fps
+    # halves software rendering/encoding spikes during scrolling while static pages encode 0 fps.
+    extra+=(
+      --video-codec="${KINDLE_VIDEO_CODEC:-vp8}"
+      --video-bit-rate="${KINDLE_BIT_RATE:-16M}"
+      --max-fps="${KINDLE_MAX_FPS:-30}"
+      --video-codec-options=i-frame-interval=1
+    )
     # scrcpy 5+ defaults to VA-API hardware decoding, whose DMA-BUF/EGL import fails on X11 (and
     # some GPU/driver setups), leaving a blank or green window. Software decoding costs next to
     # nothing for static book pages. KINDLE_HWDEC overrides (e.g. vaapi or auto).
-    if [[ $(scrcpy_bin) == "$SCRCPY_DIR/scrcpy" ]] || "$(scrcpy_bin)" --help 2>/dev/null | grep -q -- '--hwdec'; then
-      extra+=(--hwdec="${KINDLE_HWDEC:-disabled}")
-    fi
+    ((!has_hwdec)) || extra+=(--hwdec="${KINDLE_HWDEC:-disabled}")
+    rdriver=${KINDLE_RENDER_DRIVER:-$(state_get render_driver)}
+    [[ -z $rdriver ]] || extra+=(--render-driver="$rdriver")
+
     # stdbuf: scrcpy writes its log line by line (to a file it would hold lines back until exit).
     # No hover events or mipmaps: Kindle has no use for the one, and the picture is never scaled
     # down, so the other is wasted work.
     env "${adb_env[@]}" "${server[@]}" SDL_APP_ID="$WINDOW_ID" SCRCPY_ICON_PATH="$KINDLE_ICON" "${big[@]}" \
-      stdbuf -oL -eL "$(scrcpy_bin)" --serial="$serial" "${screen[@]}" \
+      stdbuf -oL -eL "$sbin" --serial="$serial" "${screen[@]}" \
       --start-app="$KINDLE_PKG" --window-title=Kindle --no-audio --no-mouse-hover --no-mipmaps "${extra[@]}" \
       >>"$log" 2>&1 </dev/null 9>&- &
-    pid=$!
+    _kfl_scrcpy_pid=$!
     started=$SECONDS
     if [[ $mode == sign-in ]]; then
-      watch_sign_in "$pid" 9>&- &
+      watch_sign_in "$_kfl_scrcpy_pid" 9>&- &
     else
-      watch_app "$pid" "$log" 9>&- &
+      watch_app "$_kfl_scrcpy_pid" "$log" 9>&- &
     fi
-    watcher=$!
+    _kfl_watcher_pid=$!
     rc=0
-    wait "$pid" || rc=$?
-    kill "$watcher" 2>/dev/null || true
-    wait "$watcher" 2>/dev/null || true
-    reopen=$(cat "$STATE_DIR/reopen" 2>/dev/null || true)
+    wait "$_kfl_scrcpy_pid" || rc=$?
+    _kfl_scrcpy_pid=""
+    if [[ -n $_kfl_watcher_pid ]]; then
+      pkill -P "$_kfl_watcher_pid" 2>/dev/null || true
+      kill "$_kfl_watcher_pid" 2>/dev/null || true
+      wait "$_kfl_watcher_pid" 2>/dev/null || true
+      _kfl_watcher_pid=""
+    fi
+    reopen=$(<"$STATE_DIR/reopen" 2>/dev/null) || reopen=""
     if [[ $reopen == normal ]]; then
       restore_main_screen keep-density
       mode=normal
       notify "Signed in" "Opening your library…"
       continue
     elif [[ $reopen == sign-in ]]; then
-      if [[ $BACKEND == waydroid && $(display_mode) == x11 ]]; then
+      if [[ $BACKEND == waydroid && $dmode == x11 ]]; then
         restore_main_screen
         fail "Amazon didn't finish signing you in." "Run \"$CMD --sign-in\" to try again."
       fi
@@ -440,19 +547,26 @@ open_kindle() { # $1 = auto (sign in first if Kindle isn't signed in yet) or sig
       notify "Amazon didn't finish signing you in" "Opening Amazon's sign-in page in Android's window instead."
       restore_main_screen
       kfl_adb -s "$serial" shell am force-stop "$KINDLE_PKG" >/dev/null 2>&1 || true
-      trap - EXIT
-      pkill -P "$color_pid" 2>/dev/null || true
-      kill "$color_pid" 2>/dev/null || true
+      trap - EXIT TERM HUP INT
+      pkill -P "$_kfl_color_pid" 2>/dev/null || true
+      kill "$_kfl_color_pid" 2>/dev/null || true
       exec 9>&-
       sign_in_window
       return
     fi
-    # scrcpy exits with 2 when its link to Android drops. The emulator's adb link (virtio-vsock)
-    # can drop for a moment under load, e.g. while a book opens, and comes back within a second
-    # with Android and Kindle untouched. Reopen the window then instead of reporting a failure.
-    # Only for a window that had been open a while, and a few times at most, so a link that
-    # keeps failing still ends in the error below.
-    if ((rc == 2)) && [[ $mode == normal ]] && ((SECONDS - started >= 5 && drops < 3)) &&
+    # Minimal VMs or remote X11/Wayland sessions without working OpenGL/EGL/GLX fail SDL renderer
+    # creation (rc=1). Fall back automatically to SDL's software renderer and remember it.
+    if ((rc == 1 && !sw_retried && SECONDS - started < 5)) && [[ -z ${KINDLE_RENDER_DRIVER:-} && $rdriver != software ]] &&
+      grep -qiE 'renderer|opengl|egl|glx' "$log" 2>/dev/null; then
+      sw_retried=1
+      state_set render_driver software
+      printf '\n[kindle] OpenGL renderer unavailable; retrying with SDL software renderer.\n\n' >>"$log"
+      continue
+    fi
+    # scrcpy exits with 2 when its link to Android drops (or if an unpatched distro server hits
+    # Android 15 Codec2's dequeue-cancelled race during an initial tiling resize). Reopen cleanly.
+    if [[ $mode == normal ]] && ((drops < 3)) &&
+      { { ((rc == 2 && SECONDS - started >= 5)); } || grep -q "Pending dequeue output buffer request cancelled" "$log" 2>/dev/null; } &&
       serial=$(android_connect 15); then
       drops=$((drops + 1))
       printf '\n[kindle] Lost the connection to Android; reopening the window (%d).\n\n' "$drops" >>"$log"
@@ -530,14 +644,18 @@ sign_in_window() {
       stop_android
       EMU_WINDOW=1 start_android 240 || fail "Kindle couldn't start Android." "Details are in $STATE_DISPLAY."
     fi
+    trap 'stop_android || true' EXIT
+    trap 'exit 143' TERM HUP
+    trap 'exit 130' INT
   else
     case $(android_state) in
       STOPPED) start_android 240 || fail "Kindle couldn't start Android." "Details are in $STATE_DISPLAY." ;;
-      FROZEN) android_wake ;;
+      FROZEN) android_wake FROZEN ;;
     esac
     setsid -f waydroid show-full-ui >/dev/null 2>&1 </dev/null 9>&-
   fi
   serial=$(android_connect 60) || fail "Kindle can't reach Android." "Run \"$CMD --stop\", then \"$CMD --sign-in\"."
+  ensure_emulator_trimmed "$serial"
   kfl_adb -s "$serial" shell wm density reset >/dev/null 2>&1 || true
   state_set display0_density ""
   kfl_adb -s "$serial" logcat -c >/dev/null 2>&1 || true
@@ -589,6 +707,7 @@ sign_in_window() {
     fi
     sleep 2
   done
+  trap - EXIT TERM HUP INT
   if [[ $BACKEND == emulator ]]; then
     stop_android # its window closes; Kindle's usual window starts it again without one
   elif ((signed_in)); then

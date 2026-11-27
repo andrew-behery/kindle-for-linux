@@ -41,6 +41,22 @@ index d7d1a76..5c6df70 100644
              }
          } catch (Exception e) {
              Ln.w("Cannot set UID", e);
+diff --git i/server/src/main/java/com/genymobile/scrcpy/video/CaptureControl.java w/server/src/main/java/com/genymobile/scrcpy/video/CaptureControl.java
+index 7933ea7..a2231d7 100644
+--- i/server/src/main/java/com/genymobile/scrcpy/video/CaptureControl.java
++++ w/server/src/main/java/com/genymobile/scrcpy/video/CaptureControl.java
+@@ -28,8 +28,10 @@ public class CaptureControl {
+         assert reason != 0;
+         reset |= reason;
+         if (runningMediaCodec != null) {
++            MediaCodec codec = runningMediaCodec;
++            runningMediaCodec = null;
+             try {
+-                runningMediaCodec.signalEndOfInputStream();
++                codec.signalEndOfInputStream();
+             } catch (IllegalStateException e) {
+                 // ignore
+             }
 diff --git i/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java w/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
 index 5ed4c73..0df2a36 100644
 --- i/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
@@ -73,3 +89,57 @@ index 5ed4c73..0df2a36 100644
              if (Build.VERSION.SDK_INT >= AndroidVersions.API_33_ANDROID_13) {
                  flags |= VIRTUAL_DISPLAY_FLAG_TRUSTED
                          | VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP
+diff --git i/server/src/main/java/com/genymobile/scrcpy/video/SurfaceEncoder.java w/server/src/main/java/com/genymobile/scrcpy/video/SurfaceEncoder.java
+index 539681b..b4986a3 100644
+--- i/server/src/main/java/com/genymobile/scrcpy/video/SurfaceEncoder.java
++++ w/server/src/main/java/com/genymobile/scrcpy/video/SurfaceEncoder.java
+@@ -157,6 +157,22 @@ public class SurfaceEncoder implements AsyncProcessor {
+                         // Do not retry on broken pipe, which is expected on close because the socket is closed by the client
+                         throw e;
+                     }
++                    if (stopped.get()) {
++                        alive = false;
++                        continue;
++                    }
++                    if (captureControl.isResetRequested()
++                            || (e instanceof IllegalStateException && e.getMessage() != null
++                                    && e.getMessage().contains("Pending dequeue output buffer request cancelled"))) {
++                        // Android 14/15 Codec2 (CCodecBufferChannel) can cancel an in-flight
++                        // dequeueOutputBuffer with IllegalStateException when interrupted by a
++                        // rapid flex-display resize (signalEndOfInputStream). Reconfigure at the
++                        // new window size instead of treating the resize interruption as an error.
++                        Ln.d("Encoding interrupted during resize: " + e.getMessage());
++                        retainedResetReasons = resetReasons;
++                        alive = !stopped.get() && !capture.isClosed();
++                        continue;
++                    }
+                     Ln.e("Capture/encoding error: " + e.getClass().getName() + ": " + e.getMessage());
+                     if (!prepareRetry(caps, size)) {
+                         throw e;
+@@ -176,7 +192,16 @@ public class SurfaceEncoder implements AsyncProcessor {
+                             // ignore (just in case)
+                         }
+                     }
+-                    mediaCodec.reset();
++                    try {
++                        mediaCodec.reset();
++                    } catch (IllegalStateException e) {
++                        try {
++                            mediaCodec.release();
++                        } catch (Exception ignored) {
++                            // ignore
++                        }
++                        mediaCodec = createMediaCodec(codec, encoderName);
++                    }
+                     if (surface != null) {
+                         surface.release();
+                     }
+@@ -363,6 +388,8 @@ public class SurfaceEncoder implements AsyncProcessor {
+                 if (!IO.isBrokenPipe(e)) {
+                     Ln.e("Video encoding error", e);
+                 }
++            } catch (RuntimeException e) {
++                Ln.e("Video encoding error", e);
+             } finally {
+                 Ln.d("Screen streaming stopped");
+                 listener.onTerminated(true);

@@ -49,8 +49,10 @@ def manifest_icon_ids(axml):
     """Resource IDs of <application>'s icon and roundIcon, from the binary manifest."""
     strings, resmap, found = [], [], {}
     off = struct.unpack_from("<H", axml, 2)[0]
-    while off < len(axml):
+    while off + 8 <= len(axml):
         ctype, header_size, size = struct.unpack_from("<HHI", axml, off)
+        if size < 8:
+            break
         if ctype == 0x0001:
             strings = string_pool(axml, off)
         elif ctype == 0x0180:
@@ -58,7 +60,7 @@ def manifest_icon_ids(axml):
         elif ctype == 0x0102:  # start element
             ext = off + header_size
             _ns, name, attr_start, attr_size, attr_count = struct.unpack_from("<IIHHH", axml, ext)
-            if strings[name] == "application":
+            if name < len(strings) and strings[name] == "application":
                 for i in range(attr_count):
                     a = ext + attr_start + i * attr_size
                     _ans, aname, _raw, _vsize, _res0, vtype, data = struct.unpack_from("<IIIHBBI", axml, a)
@@ -77,16 +79,20 @@ def resource_files(arsc, res_id):
     off = header_size
     values = []
     out = []
-    while off < len(arsc):
+    while off + 8 <= len(arsc):
         ctype, chs, size = struct.unpack_from("<HHI", arsc, off)
+        if size < 8:
+            break
         if ctype == 0x0001 and not values:
             values = string_pool(arsc, off)
         elif ctype == 0x0200:  # package
             (pid,) = struct.unpack_from("<I", arsc, off + 8)
             if pid == pkg_id:
                 sub = off + chs
-                while sub < off + size:
+                while sub + 8 <= off + size:
                     stype, shs, ssize = struct.unpack_from("<HHI", arsc, sub)
+                    if ssize < 8:
+                        break
                     if stype == 0x0201:
                         tid, flags, _r, count, entries_start = struct.unpack_from("<BBHII", arsc, sub + 8)
                         if tid == type_id:

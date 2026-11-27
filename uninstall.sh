@@ -118,6 +118,7 @@ else
   if [[ -n $(state_get firewalld_rules_added) ]]; then
     sudo firewall-cmd --zone=trusted --remove-interface=waydroid0 2>/dev/null || true
     sudo firewall-cmd --zone=trusted --remove-port=53/udp --remove-port=67/udp 2>/dev/null || true
+    sudo firewall-cmd --zone=trusted --remove-forward 2>/dev/null || true
     sudo firewall-cmd --runtime-to-permanent 2>/dev/null || true
   fi
 
