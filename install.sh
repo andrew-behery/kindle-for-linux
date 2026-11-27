@@ -122,12 +122,49 @@ mode=$(display_mode)
 [[ $mode != none ]] || die "Run this from a terminal inside your desktop session, not over SSH or a text console."
 
 # Which way Android runs (see lib.sh). Waydroid needs binder in the kernel and a GPU its Android
-# can draw with: it picks an AMD/Intel/ARM one by itself and skips NVIDIA. Without one, Android
-# would draw on the CPU, where its video encoder (which Kindle's window needs) crashes.
+# can draw with: it picks an AMD/Intel/ARM one by itself and skips NVIDIA or unaccelerated VM GPUs
+# (such as virtio_gpu without virgl 3D). Without one, Android/cage fails or draws on the CPU.
+virtio_has_3d() {
+  local node
+  for node in /sys/class/drm/renderD*; do
+    [[ -r $node/device/uevent ]] || continue
+    grep -qx 'DRIVER=virtio_gpu' "$node/device/uevent" || continue
+    # Linux's virtio core exposes negotiated feature bits (LSB-first) in sysfs; bit 0 is
+    # VIRTIO_GPU_F_VIRGL (3D acceleration). World-readable, no render-group or Python needed.
+    if [[ -r $node/device/features ]]; then
+      [[ $(<"$node/device/features") == 1* ]] && return 0
+      continue
+    fi
+    command -v python3 >/dev/null || continue
+    python3 -c '
+import ctypes, fcntl, os, struct, sys
+try:
+    fd = os.open(sys.argv[1], os.O_RDWR)
+    try:
+        val = ctypes.c_int(0)
+        buf = bytearray(struct.pack("QQ", 1, ctypes.addressof(val))) # VIRTGPU_PARAM_3D_FEATURES
+        fcntl.ioctl(fd, 0xc0106443, buf)                             # DRM_IOCTL_VIRTGPU_GETPARAM
+        sys.exit(0 if val.value else 1)
+    finally:
+        os.close(fd)
+except OSError:
+    sys.exit(1)
+' "/dev/dri/${node##*/}" 2>/dev/null && return 0
+  done
+  return 1
+}
 has_binder=0
 if grep -qw binder /proc/filesystems || modinfo binder_linux >/dev/null 2>&1; then has_binder=1; fi
 gpu_drivers=$(for f in /sys/class/drm/renderD*/device/uevent; do if [[ -r $f ]]; then sed -n 's/^DRIVER=//p' "$f"; fi; done | sort -u | xargs)
-waydroid_gpu=$(tr ' ' '\n' <<<"$gpu_drivers" | grep -vxe nvidia -e '' | head -n1 || true)
+waydroid_gpu=""
+for drv in $gpu_drivers; do
+  case $drv in
+    nvidia | bochs | bochs-drm | cirrus | qxl | vboxvideo | simpledrm | vkms | udl | evdi | vgem | hyperv_drm | ast | mgag200) continue ;;
+    virtio_gpu) virtio_has_3d || continue ;;
+  esac
+  waydroid_gpu=$drv
+  break
+done
 if [[ -n ${KINDLE_BACKEND:-} ]]; then
   BACKEND=$KINDLE_BACKEND
 elif [[ -n $waydroid_gpu && $has_binder == 1 ]] || [[ $arch == aarch64 ]]; then
@@ -152,7 +189,7 @@ case $BACKEND in
   emulator)
     [[ $arch == x86_64 ]] || die "The Android emulator needs an x86_64 computer."
     [[ -e /dev/kvm ]] || die "The Android emulator needs hardware virtualization (KVM), and /dev/kvm is missing.
-  Turn on virtualization (Intel VT-x or AMD-V/SVM) in your firmware settings, then run this again."
+  Turn on virtualization (Intel VT-x, AMD-V/SVM, or nested KVM in a VM) in your firmware/VM settings, then run this again."
     ;;
   *) die "KINDLE_BACKEND must be waydroid or emulator." ;;
 esac
@@ -193,6 +230,9 @@ if [[ $BACKEND == waydroid ]]; then
   [[ $arch == x86_64 ]] && note "ARM translation: $arm_layer (Kindle is ARM-only)"
 else
   why="no GPU Waydroid can use (${gpu_drivers:-none found})"
+  if [[ " $gpu_drivers " == *" virtio_gpu "* ]] && ! virtio_has_3d; then
+    why="virtio_gpu has no 3D acceleration (virgl) enabled"
+  fi
   ((has_binder)) || why="no binder support in this kernel"
   [[ -z ${KINDLE_BACKEND:-} ]] || why="KINDLE_BACKEND=emulator"
   if [[ $(emu_gpu) == host ]]; then drawing="the GPU"; else drawing="the CPU (SwiftShader)"; fi
@@ -240,6 +280,33 @@ fetch_verified() { # url sha256 file
   mv "$file.part" "$file"
 }
 
+pkg_install() {
+  case $pm in
+    pacman) root pacman -S --needed --noconfirm "$@" ;;
+    apt-get) root apt-get install -y "$@" ;;
+    dnf) root dnf install -y "$@" ;;
+    zypper) root zypper --non-interactive install "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Base tools needed by install.sh on both backends (e.g. cloud-init VMs often lack unzip).
+ensure_base_tools() {
+  local missing=()
+  command -v curl >/dev/null || missing+=(curl)
+  command -v unzip >/dev/null || missing+=(unzip)
+  command -v python3 >/dev/null || missing+=(python3)
+  ((${#missing[@]})) || return 0
+  [[ -n $pm ]] || die "Missing required tools (${missing[*]}). Install them with your package manager, then rerun."
+  say "Installing required tools (${missing[*]})"
+  if [[ $pm == apt-get ]]; then
+    pkg_install "${missing[@]}" || { root apt-get update && pkg_install "${missing[@]}"; } || die "Installing ${missing[*]} failed."
+  else
+    pkg_install "${missing[@]}" || die "Installing ${missing[*]} failed."
+  fi
+}
+
+ensure_base_tools
 state_set backend "$BACKEND"
 
 if [[ $BACKEND == waydroid ]]; then # --- Waydroid: up to "Kindle's window" ---------------------
@@ -258,16 +325,6 @@ add_waydroid_apt_repo() {
   root apt-get update ||
     die "Waydroid has no packages for '$codename'. Supported: Debian 11-13, Ubuntu 20.04 and newer, and distros based on them."
   state_set apt_repo_added 1
-}
-
-pkg_install() {
-  case $pm in
-    pacman) root pacman -S --needed --noconfirm "$@" ;;
-    apt-get) root apt-get install -y "$@" ;;
-    dnf) root dnf install -y "$@" ;;
-    zypper) root zypper --non-interactive install "$@" ;;
-    *) return 1 ;;
-  esac
 }
 
 install_packages() {
@@ -290,8 +347,13 @@ install_packages() {
     if [[ $pm == apt-get && " ${pkgs[*]} " == *" waydroid "* && $(apt-cache policy waydroid 2>/dev/null || true) != *"Candidate: "[0-9]* ]]; then
       add_waydroid_apt_repo
     fi
-    pkg_install "${pkgs[@]}" ||
-      die "Installing ${pkgs[*]} failed.${pm:+ Update your system first, then rerun.}"
+    if [[ $pm == apt-get ]]; then
+      pkg_install "${pkgs[@]}" || { root apt-get update && pkg_install "${pkgs[@]}"; } ||
+        die "Installing ${pkgs[*]} failed. Update your system first, then rerun."
+    else
+      pkg_install "${pkgs[@]}" ||
+        die "Installing ${pkgs[*]} failed.${pm:+ Update your system first, then rerun.}"
+    fi
   else
     note "Waydroid is already installed."
   fi

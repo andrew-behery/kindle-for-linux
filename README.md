@@ -25,7 +25,7 @@ Install the package for your distro from the [Releases](https://github.com/andre
 
 **Arch Linux:**
 ```sh
-curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.3/kindle-for-linux-0.1.3-1-any.pkg.tar.zst -o /tmp/kindle-for-linux.pkg.tar.zst
+curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.4/kindle-for-linux-0.1.4-1-any.pkg.tar.zst -o /tmp/kindle-for-linux.pkg.tar.zst
 sudo pacman -U /tmp/kindle-for-linux.pkg.tar.zst
 kindle-for-linux --setup
 ```
@@ -33,20 +33,20 @@ kindle-for-linux --setup
 
 **Debian, Ubuntu, Linux Mint:**
 ```sh
-curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.3/kindle-for-linux_0.1.3_all.deb -o /tmp/kindle-for-linux.deb
+curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.4/kindle-for-linux_0.1.4_all.deb -o /tmp/kindle-for-linux.deb
 sudo apt install /tmp/kindle-for-linux.deb
 kindle-for-linux --setup
 ```
 
 **Fedora:**
 ```sh
-sudo dnf install https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.3/kindle-for-linux-0.1.3-1.noarch.rpm
+sudo dnf install https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.4/kindle-for-linux-0.1.4-1.noarch.rpm
 kindle-for-linux --setup
 ```
 
 **openSUSE:**
 ```sh
-curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.3/kindle-for-linux-0.1.3-1.noarch.rpm -o /tmp/kindle-for-linux.rpm
+curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.4/kindle-for-linux-0.1.4-1.noarch.rpm -o /tmp/kindle-for-linux.rpm
 sudo zypper install /tmp/kindle-for-linux.rpm
 kindle-for-linux --setup
 ```
@@ -110,9 +110,11 @@ Open **Kindle** from your app menu, or run `kindle` (`kindle-for-linux` when ins
 - Kindle is light or dark like your desktop, and switches when your desktop does. It's read from
   the desktop portal, so it works on GNOME, KDE, Hyprland, Sway and others.
 - Copy and paste work between Kindle and your other apps (Ctrl+C / Ctrl+V). Right-click is Back.
-- Everything in Kindle is sized like your other apps. For larger or smaller text and buttons
-  everywhere, set a density: `KINDLE_DENSITY=200 kindle` (the default is 160 × your display's
-  scale). Book text size is also in Kindle's own reading settings.
+- Everything in Kindle is sized like your other apps. For smaller or larger text and buttons
+  everywhere (even smaller than Kindle's smallest font slider), set a density:
+  `kindle --density 110` (or `200` for larger; the default is 160 × your display's scale, and
+  `kindle --density reset` restores it). For one launch only: `KINDLE_DENSITY=110 kindle`. Book
+  text size is also in Kindle's own reading settings.
 - `kindle --stop` shuts Android down and frees its memory. `kindle --status` shows its state.
 - `kindle --setup`, `kindle --verify [--bench]`, `kindle --uninstall`, and `kindle --version` manage the install from anywhere.
 

@@ -278,10 +278,14 @@ emu_env() {
   env HOME="$ADB_HOME" ANDROID_SDK_ROOT="$EMU_SDK" ANDROID_HOME="$EMU_SDK" ANDROID_AVD_HOME="$EMU_AVD_HOME" \
     ANDROID_EMULATOR_HOME="$ADB_HOME/.android" "$@"
 }
-# The emulator's process: its path starts with our SDK, which nothing else's does.
-emu_pid() { pgrep -u "$UID" -f "^$EMU_SDK/emulator/qemu/" | head -n1 || true; }
+# The emulator's process (the launcher before exec, then QEMU): its path starts with our SDK.
+emu_pid() { pgrep -u "$UID" -f "^$EMU_SDK/emulator/(emulator( |$)|qemu/)" | head -n1 || true; }
 # Is the running emulator showing its own window (sign-in), rather than running headless?
-emu_windowed() { local p; p=$(emu_pid); [[ -n $p ]] && ! tr '\0' ' ' <"/proc/$p/cmdline" | grep -q -- '-no-window'; }
+emu_windowed() {
+  local p cmd
+  p=$(emu_pid)
+  [[ -n $p ]] && cmd=$(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null || true) && [[ -n $cmd && " $cmd " != *" -no-window "* ]]
+}
 emu_console() { ADB_TIMEOUT=10 kfl_adb -s "$EMU_SERIAL" emu "$@" 2>/dev/null | tr -d '\r'; }
 emu_state() {
   [[ -n $(emu_pid) ]] || {
@@ -303,7 +307,7 @@ emu_gpu() {
   fi
 }
 emu_start() { # $1 = seconds to wait for the boot; EMU_WINDOW=1 shows the emulator's own window
-  local deadline=$((SECONDS + ${1:-180})) log=$STATE_DIR/emulator.log window=(-no-window)
+  local deadline=$((SECONDS + ${1:-180})) log=$STATE_DIR/emulator.log window=(-no-window) launched=0
   mkdir -p "$STATE_DIR"
   kfl_adb start-server >/dev/null 2>&1 || true
   [[ ${EMU_WINDOW:-} != 1 ]] || window=()
@@ -313,8 +317,16 @@ emu_start() { # $1 = seconds to wait for the boot; EMU_WINDOW=1 shows the emulat
     emu_env setsid -f "$EMU_SDK/emulator/emulator" -avd "$EMU_AVD" "${window[@]}" -no-snapshot -no-boot-anim \
       -no-metrics -skip-adb-auth -ports "$EMU_CONSOLE_PORT,$((EMU_CONSOLE_PORT + 1))" -gpu "$(emu_gpu)" \
       -camera-back none -camera-front none >"$log" 2>&1 </dev/null 9>&-
+    launched=1
   elif [[ $(emu_state) == FROZEN ]]; then
     emu_console avd start >/dev/null
+  fi
+  if ((launched)); then
+    # setsid -f returns right after fork(), before its child finishes execing the emulator.
+    local grace=$((SECONDS + 5))
+    while [[ -z $(emu_pid) ]] && ((SECONDS < grace)); do
+      sleep 0.05
+    done
   fi
   until emu_booted; do
     ((SECONDS < deadline)) || return 1
