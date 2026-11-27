@@ -47,6 +47,7 @@ Usage: $CMD [OPTION]
   --status          show whether Android is running, paused, or stopped
   --setup [ARGS]    run setup (accepts --check or --apk FILE)
   --verify [--bench] check the install and measure disk, memory, CPU, and open speed
+  --diagnostics     print system, install, and recent log details for bug reports
   --uninstall       remove Kindle for Linux data and Android setup
   --version         show version
   --help            show this help
@@ -54,7 +55,7 @@ EOF
 }
 
 needs_setup() {
-  [[ -n $(state_get backend) ]] || return 0
+  [[ -n $(state_get backend) && -n $(state_get command) ]] || return 0
   if [[ $BACKEND == emulator ]]; then
     [[ -x $EMU_SDK/emulator/emulator ]] || return 0
   else
@@ -545,7 +546,8 @@ open_kindle() { # $1 = auto (sign in first if Kindle isn't signed in yet) or sig
       wait "$_kfl_watcher_pid" 2>/dev/null || true
       _kfl_watcher_pid=""
     fi
-    reopen=$(<"$STATE_DIR/reopen" 2>/dev/null) || reopen=""
+    reopen=""
+    [[ ! -r $STATE_DIR/reopen ]] || reopen=$(<"$STATE_DIR/reopen")
     if [[ $reopen == normal ]]; then
       restore_main_screen keep-density
       mode=normal
@@ -666,9 +668,18 @@ sign_in_window() {
       STOPPED) start_android 240 || fail "Kindle couldn't start Android." "Details are in $STATE_DISPLAY." ;;
       FROZEN) android_wake FROZEN ;;
     esac
-    setsid -f waydroid show-full-ui >/dev/null 2>&1 </dev/null 9>&-
   fi
-  serial=$(android_connect 60) || fail "Kindle can't reach Android." "Run \"$CMD --stop\", then \"$CMD --sign-in\"."
+  if ! serial=$(android_connect 20); then
+    notify "Restarting Kindle…" "Android stopped responding, so Kindle is starting it again."
+    stop_android
+    if [[ $BACKEND == emulator ]]; then
+      EMU_WINDOW=1 start_android 240 || fail "Kindle couldn't restart Android." "Details are in $STATE_DISPLAY."
+    else
+      start_android 240 || fail "Kindle couldn't restart Android." "Details are in $STATE_DISPLAY."
+    fi
+    serial=$(android_connect 60) || fail "Kindle can't reach Android." "Run \"$CMD --stop\", then \"$CMD --sign-in\"."
+  fi
+  [[ $BACKEND != waydroid ]] || setsid -f waydroid show-full-ui >/dev/null 2>&1 </dev/null 9>&-
   ensure_emulator_trimmed "$serial"
   kfl_adb -s "$serial" shell wm density reset >/dev/null 2>&1 || true
   state_set display0_density ""
@@ -731,6 +742,220 @@ sign_in_window() {
   ((!signed_in)) || setsid -f "$here/kindle" >/dev/null 2>&1 </dev/null
 }
 
+diagnostics() {
+  local esc=$'\033'
+  _diag_redact() {
+    local s=$1
+    [[ -z ${HOME:-} || $HOME == / ]] || s=${s//"$HOME"/\~}
+    printf '%s\n' "$s"
+  }
+
+  local distro="unknown"
+  if [[ -r /etc/os-release ]]; then
+    distro=$(
+      # shellcheck disable=SC1091
+      . /etc/os-release
+      printf '%s (id=%s, like=%s, version=%s, codename=%s)' \
+        "${PRETTY_NAME:-unknown}" "${ID:-?}" "${ID_LIKE:-none}" "${VERSION_ID:-none}" \
+        "${UBUNTU_CODENAME:-${DEBIAN_CODENAME:-${VERSION_CODENAME:-none}}}"
+    )
+  fi
+
+  local vm="no"
+  if command -v systemd-detect-virt >/dev/null; then
+    vm=$(systemd-detect-virt -v 2>/dev/null || true)
+    [[ -n $vm && $vm != none ]] || vm="no"
+  elif in_vm; then
+    vm="yes"
+  fi
+  local ostree="no"
+  [[ ! -e /run/ostree-booted ]] || ostree="yes"
+
+  local cpu_vendor="" cpu_model="" cores="?"
+  if [[ -r /proc/cpuinfo ]]; then
+    cpu_vendor=$(awk -F': *' '/^vendor_id[[:space:]]*:/ { print $2; exit }' /proc/cpuinfo)
+    cpu_model=$(awk -F': *' '/^(model name|Model)[[:space:]]*:/ { print $2; exit }' /proc/cpuinfo)
+  fi
+  cores=$(nproc 2>/dev/null || echo "?")
+
+  local mem="unknown"
+  if [[ -r /proc/meminfo ]]; then
+    mem=$(awk '
+      /^MemTotal:/ { t = $2 / 1048576 }
+      /^MemAvailable:/ { a = $2 / 1048576 }
+      END { printf "%.1f GB total, %.1f GB available", t, a }
+    ' /proc/meminfo)
+  fi
+
+  local disk_root="unknown" disk_data="unknown" data_probe=$DATA_HOME
+  disk_root=$(df -hP / 2>/dev/null | awk 'NR == 2 { printf "%s free / %s (%s used)", $4, $2, $5 }' || echo "unknown")
+  while [[ ! -e $data_probe && $data_probe != / && $data_probe == */* ]]; do
+    data_probe=${data_probe%/*}
+    [[ -n $data_probe ]] || data_probe=/
+  done
+  disk_data=$(df -hP "${data_probe:-/}" 2>/dev/null | awk 'NR == 2 { printf "%s free / %s (%s used)", $4, $2, $5 }' || echo "unknown")
+
+  local gpus wd_gpu nv_ver="none" binder="no" kvm="missing"
+  gpus=$(gpu_drivers_list || true)
+  wd_gpu=$(waydroid_gpu_driver || true)
+  if [[ $wd_gpu == virtio_gpu ]]; then
+    local v3d="no" vvk="no"
+    virtio_has_3d && v3d="yes"
+    virtio_has_vulkan && vvk="yes"
+    wd_gpu="virtio_gpu (virgl=$v3d, vulkan=$vvk)"
+  fi
+  [[ ! -r /proc/driver/nvidia/version ]] || nv_ver=$(head -n1 /proc/driver/nvidia/version 2>/dev/null || echo "present")
+  if grep -qw binder /proc/filesystems 2>/dev/null || { command -v modinfo >/dev/null && modinfo binder_linux >/dev/null 2>&1; }; then
+    binder="yes"
+  fi
+  if [[ -e /dev/kvm ]]; then
+    local kvm_mode kvm_rw="no"
+    kvm_mode=$(stat -c '%A %U:%G' /dev/kvm 2>/dev/null || echo "present")
+    [[ -r /dev/kvm && -w /dev/kvm ]] && kvm_rw="yes"
+    kvm="present ($kvm_mode, rw=$kvm_rw)"
+  fi
+
+  local dmode dscale cscheme pm="none" fw_ufw="n/a" fw_fwd="n/a" selinux="not present" apparmor="not present" candidate
+  dmode=$(display_mode)
+  dscale=$(display_scale 2>/dev/null || true)
+  cscheme=$(desktop_color_scheme 2>/dev/null || true)
+  for candidate in pacman apt-get dnf zypper; do
+    if command -v "$candidate" >/dev/null; then
+      pm=$candidate
+      break
+    fi
+  done
+  if command -v systemctl >/dev/null && [[ -d /run/systemd/system ]]; then
+    if command -v ufw >/dev/null; then
+      fw_ufw=$(systemctl is-active ufw 2>/dev/null || true)
+      [[ -n $fw_ufw ]] || fw_ufw="inactive"
+    fi
+    if command -v firewall-cmd >/dev/null; then
+      fw_fwd=$(systemctl is-active firewalld 2>/dev/null || true)
+      [[ -n $fw_fwd ]] || fw_fwd="inactive"
+    fi
+  fi
+  if command -v getenforce >/dev/null; then
+    selinux=$(getenforce 2>/dev/null || echo "unknown")
+  elif [[ -r /sys/fs/selinux/enforce ]]; then
+    if [[ $(</sys/fs/selinux/enforce) == 1 ]]; then selinux="Enforcing"; else selinux="Permissive"; fi
+  fi
+  if [[ -r /sys/module/apparmor/parameters/enabled ]]; then
+    if [[ $(</sys/module/apparmor/parameters/enabled) == Y ]]; then apparmor="enabled"; else apparmor="disabled"; fi
+  fi
+
+  local setup_needed="no" astate="not set up" sbin abin sver="missing" aver="missing" wd_info="not installed" cage_info="not installed" emu_info="not installed"
+  if needs_setup; then
+    setup_needed="yes"
+  else
+    astate=$(android_state 2>/dev/null || echo "unknown")
+  fi
+  sbin=$(scrcpy_bin || true)
+  if [[ -n $sbin ]]; then
+    sver=$("$sbin" --version 2>/dev/null | head -n1 || echo "present")
+    sver="$sver ($(_diag_redact "$sbin"))"
+  fi
+  abin=$(adb_bin || true)
+  if [[ -n $abin ]]; then
+    aver=$("$abin" --version 2>/dev/null | head -n1 || echo "present")
+    aver="$aver ($(_diag_redact "$abin"))"
+  fi
+  if command -v waydroid >/dev/null; then
+    local wver wsvc="n/a" wimg="unknown" wbridge="none"
+    wver=$(waydroid --version 2>/dev/null | head -n1 || echo "installed")
+    if command -v systemctl >/dev/null && [[ -d /run/systemd/system ]]; then
+      wsvc=$(systemctl is-active waydroid-container.service 2>/dev/null || true)
+      [[ -n $wsvc ]] || wsvc="inactive"
+    fi
+    if [[ -r $WAYDROID_CFG ]]; then
+      wimg=$(sed -n 's/^images_path = //p' "$WAYDROID_CFG" 2>/dev/null || true)
+      wbridge=$(sed -n 's/^ro.dalvik.vm.native.bridge = //p' "$WAYDROID_CFG" 2>/dev/null || true)
+      [[ -n $wimg ]] || wimg="default"
+      [[ -n $wbridge ]] || wbridge="none"
+    elif [[ -e $WAYDROID_CFG ]]; then
+      wimg="(unreadable without root)"
+    else
+      wimg="(not initialized)"
+    fi
+    wd_info="$wver (service=$wsvc, images=$wimg, arm=$wbridge)"
+  fi
+  if command -v cage >/dev/null; then
+    cage_info=$(command -v cage)
+  fi
+  if [[ -d $EMU_SDK/emulator || $BACKEND == emulator ]]; then
+    local ever imgver avd_ram="none"
+    ever=$(cat "$EMU_SDK/emulator/kindle-for-linux.version" 2>/dev/null || echo "missing")
+    imgver=$(cat "$EMU_SDK"/system-images/*/*/*/kindle-for-linux.version 2>/dev/null | head -n1 || true)
+    [[ -n $imgver ]] || imgver="missing"
+    if [[ -r $EMU_AVD_HOME/$EMU_AVD.avd/config.ini ]]; then
+      avd_ram=$(sed -n 's/^hw\.ramSize=//p' "$EMU_AVD_HOME/$EMU_AVD.avd/config.ini" 2>/dev/null || echo "?")
+      avd_ram="${avd_ram}MB"
+    fi
+    emu_info="emulator=$ever, image=$imgver, gpu=$(emu_gpu 2>/dev/null || echo "?"), avd_ram=$avd_ram"
+  fi
+
+  printf 'Kindle for Linux %s diagnostics (%s)\n' "$(kfl_version)" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  printf '\n[System]\n'
+  printf 'distro:         %s\n' "$distro"
+  printf 'kernel:         %s (%s)\n' "$(uname -sr)" "$(uname -m)"
+  printf 'vm:             %s (ostree=%s)\n' "$vm" "$ostree"
+  printf 'cpu:            %s%s (%s cores)\n' "${cpu_vendor:+$cpu_vendor — }" "${cpu_model:-unknown}" "$cores"
+  printf 'memory:         %s\n' "$mem"
+  printf 'disk_root:      %s\n' "$disk_root"
+  printf 'disk_data:      %s\n' "$disk_data"
+
+  printf '\n[Graphics & Virtualization]\n'
+  printf 'drm_drivers:    %s\n' "${gpus:-none}"
+  printf 'waydroid_gpu:   %s\n' "${wd_gpu:-none}"
+  printf 'nvidia_driver:  %s\n' "$nv_ver"
+  printf 'binder:         %s\n' "$binder"
+  printf 'kvm:            %s\n' "$kvm"
+
+  printf '\n[Desktop & Security]\n'
+  printf 'display_mode:   %s (session=%s, desktop=%s)\n' "$dmode" "${XDG_SESSION_TYPE:-unset}" "${XDG_CURRENT_DESKTOP:-unset}"
+  printf 'display_scale:  %s\n' "${dscale:-unknown}"
+  printf 'color_scheme:   %s\n' "${cscheme:-unknown}"
+  printf 'pkg_manager:    %s\n' "$pm"
+  printf 'firewall:       ufw=%s, firewalld=%s\n' "$fw_ufw" "$fw_fwd"
+  printf 'selinux:        %s\n' "$selinux"
+  printf 'apparmor:       %s\n' "$apparmor"
+
+  local pkg_flag
+  pkg_flag=$(state_get packaged)
+  printf '\n[Install & State]\n'
+  printf 'install_dir:    %s (packaged=%s, cmd=%s)\n' "$(_diag_redact "$here")" "${pkg_flag:-0}" "$CMD"
+  printf 'backend:        %s (KINDLE_BACKEND=%s, needs_setup=%s)\n' "$BACKEND" "${KINDLE_BACKEND:-unset}" "$setup_needed"
+  printf 'android_state:  %s\n' "$astate"
+  printf 'scrcpy:         %s\n' "$sver"
+  printf 'adb:            %s\n' "$aver"
+  printf 'waydroid:       %s\n' "$wd_info"
+  printf 'cage:           %s\n' "$cage_info"
+  printf 'emulator:       %s\n' "$emu_info"
+  local line
+  if [[ -r $STATE_FILE ]]; then
+    printf 'state_file:\n'
+    while IFS= read -r line || [[ -n $line ]]; do
+      printf '  %s\n' "$(_diag_redact "$line")"
+    done <"$STATE_FILE"
+  else
+    printf 'state_file:     none\n'
+  fi
+
+  local logf has_logs=0
+  for logf in "$STATE_DIR/install.log" "$STATE_DIR/window.log" "$STATE_DIR/session.log" "$STATE_DIR/emulator.log"; do
+    [[ -r $logf && -s $logf ]] || continue
+    if ((!has_logs)); then
+      printf '\n[Recent logs]\n'
+      has_logs=1
+    fi
+    printf '\n--- %s (last 40 lines) ---\n' "$(_diag_redact "$logf")"
+    while IFS= read -r line; do
+      _diag_redact "$line"
+    done < <(tail -n 40 "$logf" 2>/dev/null | tr -d '\r' | sed "s/${esc}\\[[0-9;]*[[:alpha:]]//g")
+  done
+  ((has_logs)) || printf '\n[Recent logs]\n(none)\n'
+}
+
 case ${1:-} in
   --help | -h)
     usage
@@ -746,6 +971,9 @@ case ${1:-} in
     shift
     [[ -x $here/verify.sh ]] || die "verify.sh is missing."
     exec "$here/verify.sh" "$@"
+    ;;
+  --diagnostics)
+    diagnostics
     ;;
   --uninstall)
     shift

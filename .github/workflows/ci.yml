@@ -13,11 +13,14 @@ jobs:
 
       - name: Check shell scripts and Python helpers
         run: |
-          bash -n install.sh kindle lib.sh uninstall.sh verify.sh scrcpy-server/adb-system scrcpy-server/build.sh packaging/build.sh
+          bash -n install.sh kindle lib.sh uninstall.sh verify.sh scrcpy-server/adb-system scrcpy-server/build.sh packaging/build.sh tests/run.sh
           sh -n scrcpy-server/kfl-scrcpy-server
           python3 -m py_compile apkcert.py apkicon.py getkindle.py
-          shellcheck -x install.sh kindle lib.sh uninstall.sh verify.sh scrcpy-server/adb-system packaging/build.sh
+          shellcheck -x install.sh kindle lib.sh uninstall.sh verify.sh scrcpy-server/adb-system packaging/build.sh tests/run.sh
           shellcheck -s sh scrcpy-server/kfl-scrcpy-server
+
+      - name: Run unit and CLI tests
+        run: ./tests/run.sh
 
       - name: Install nfpm
         run: |
@@ -33,16 +36,24 @@ jobs:
           name: packages
           path: dist/
 
-  test-deb-ubuntu:
+  test-deb:
     needs: lint-and-build
     runs-on: ubuntu-latest
-    container: ubuntu:24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - debian:12
+          - debian:13
+    container: ${{ matrix.image }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: packages
           path: dist/
-      - name: Install and smoke-test .deb on Ubuntu 24.04
+      - name: Install and smoke-test .deb on ${{ matrix.image }}
         run: |
           apt-get update
           apt-get install -y --no-install-recommends ./dist/kindle-for-linux_*.deb desktop-file-utils
@@ -53,6 +64,9 @@ jobs:
           kindle-for-linux --help
           kindle-for-linux --status
           kindle-for-linux --stop
+          kindle-for-linux --diagnostics
+          useradd -m tester
+          su -s /bin/bash tester -c 'kindle-for-linux --version && kindle-for-linux --status && kindle-for-linux --diagnostics >/dev/null'
           apt-get remove -y kindle-for-linux
           ! test -e /usr/bin/kindle-for-linux
           ! test -e /usr/share/kindle-for-linux
@@ -60,15 +74,21 @@ jobs:
   test-rpm-fedora:
     needs: lint-and-build
     runs-on: ubuntu-latest
-    container: fedora:41
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - fedora:41
+          - fedora:latest
+    container: ${{ matrix.image }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: packages
           path: dist/
-      - name: Install and smoke-test .rpm on Fedora 41
+      - name: Install and smoke-test .rpm on ${{ matrix.image }}
         run: |
-          dnf install -y ./dist/kindle-for-linux-*.rpm desktop-file-utils
+          dnf install -y ./dist/kindle-for-linux-*.rpm desktop-file-utils shadow-utils
           desktop-file-validate /usr/share/applications/kindle-for-linux.desktop
           test -f /usr/share/icons/hicolor/scalable/apps/kindle-for-linux.svg
           test -f /usr/share/licenses/kindle-for-linux/LICENSE
@@ -76,7 +96,36 @@ jobs:
           kindle-for-linux --help
           kindle-for-linux --status
           kindle-for-linux --stop
+          kindle-for-linux --diagnostics
+          useradd -m tester
+          su -s /bin/bash tester -c 'kindle-for-linux --version && kindle-for-linux --status && kindle-for-linux --diagnostics >/dev/null'
           dnf remove -y kindle-for-linux
+          ! test -e /usr/bin/kindle-for-linux
+          ! test -e /usr/share/kindle-for-linux
+
+  test-rpm-opensuse:
+    needs: lint-and-build
+    runs-on: ubuntu-latest
+    container: opensuse/tumbleweed
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist/
+      - name: Install and smoke-test .rpm on openSUSE Tumbleweed
+        run: |
+          zypper --non-interactive install --allow-unsigned-rpm ./dist/kindle-for-linux-*.rpm desktop-file-utils shadow
+          desktop-file-validate /usr/share/applications/kindle-for-linux.desktop
+          test -f /usr/share/icons/hicolor/scalable/apps/kindle-for-linux.svg
+          test -f /usr/share/licenses/kindle-for-linux/LICENSE
+          kindle-for-linux --version
+          kindle-for-linux --help
+          kindle-for-linux --status
+          kindle-for-linux --stop
+          kindle-for-linux --diagnostics
+          useradd -m tester
+          su -s /bin/bash tester -c 'kindle-for-linux --version && kindle-for-linux --status && kindle-for-linux --diagnostics >/dev/null'
+          zypper --non-interactive remove kindle-for-linux
           ! test -e /usr/bin/kindle-for-linux
           ! test -e /usr/share/kindle-for-linux
 
@@ -105,6 +154,33 @@ jobs:
           kindle-for-linux --help
           kindle-for-linux --status
           kindle-for-linux --stop
+          su - builder -c 'kindle-for-linux --version && kindle-for-linux --status && kindle-for-linux --diagnostics >/dev/null'
           pacman -R --noconfirm kindle-for-linux
           ! test -e /usr/bin/kindle-for-linux
           ! test -e /usr/share/kindle-for-linux
+
+  test-tarball:
+    needs: lint-and-build
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist/
+      - name: Smoke-test universal release tarball
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3 curl unzip ca-certificates procps
+          useradd -m tester
+          mkdir -p /tmp/tarball
+          tar -xzf dist/kindle-for-linux-*.tar.gz -C /tmp/tarball
+          chown -R tester:tester /tmp/tarball
+          su -s /bin/bash tester -c '
+            dir=$(echo /tmp/tarball/kindle-for-linux-*)
+            "$dir/kindle" --version
+            "$dir/kindle" --help >/dev/null
+            "$dir/kindle" --status
+            "$dir/kindle" --stop
+            "$dir/kindle" --diagnostics >/dev/null
+          '

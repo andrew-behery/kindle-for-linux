@@ -20,6 +20,9 @@ jobs:
           file_ver="$(<VERSION)"
           test "$tag_ver" = "$file_ver" || { echo "Tag $tag_ver != VERSION $file_ver" >&2; exit 1; }
 
+      - name: Run unit and CLI tests
+        run: ./tests/run.sh
+
       - name: Install nfpm
         run: |
           curl -fsSL https://github.com/goreleaser/nfpm/releases/download/v2.49.0/nfpm_2.49.0_Linux_x86_64.tar.gz \
@@ -43,7 +46,7 @@ jobs:
         with: { name: release-packages, path: dist/ }
       - run: |
           apt-get update && apt-get install -y ./dist/kindle-for-linux_*.deb
-          kindle-for-linux --version && kindle-for-linux --status
+          kindle-for-linux --version && kindle-for-linux --status && kindle-for-linux --diagnostics >/dev/null
 
   test-fedora:
     needs: build
@@ -54,7 +57,18 @@ jobs:
         with: { name: release-packages, path: dist/ }
       - run: |
           dnf install -y ./dist/kindle-for-linux-*.rpm
-          kindle-for-linux --version && kindle-for-linux --status
+          kindle-for-linux --version && kindle-for-linux --status && kindle-for-linux --diagnostics >/dev/null
+
+  test-opensuse:
+    needs: build
+    runs-on: ubuntu-latest
+    container: opensuse/tumbleweed
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: release-packages, path: dist/ }
+      - run: |
+          zypper --non-interactive install --allow-unsigned-rpm ./dist/kindle-for-linux-*.rpm
+          kindle-for-linux --version && kindle-for-linux --status && kindle-for-linux --diagnostics >/dev/null
 
   build-arch:
     needs: build
@@ -72,7 +86,7 @@ jobs:
           chown -R builder:builder /tmp/aur
           su - builder -c 'cd /tmp/aur && makepkg -f --noconfirm'
           pacman -U --noconfirm /tmp/aur/kindle-for-linux-*.pkg.tar.zst
-          kindle-for-linux --version && kindle-for-linux --status
+          kindle-for-linux --version && kindle-for-linux --status && kindle-for-linux --diagnostics >/dev/null
           pacman -R --noconfirm kindle-for-linux
           mkdir -p arch-dist
           cp /tmp/aur/kindle-for-linux-*.pkg.tar.zst arch-dist/
@@ -82,7 +96,7 @@ jobs:
           path: arch-dist/
 
   publish:
-    needs: [build, test-ubuntu, test-fedora, build-arch]
+    needs: [build, test-ubuntu, test-fedora, test-opensuse, build-arch]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

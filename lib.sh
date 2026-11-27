@@ -268,24 +268,26 @@ adb_bin() {
 kfl_adb() {
   local bin=$SCRCPY_DIR/adb
   if [[ ! -x $bin ]]; then
-    [[ -n $_KFL_ADB ]] || _KFL_ADB=$(command -v adb)
+    [[ -n $_KFL_ADB ]] || _KFL_ADB=$(command -v adb || true)
     bin=$_KFL_ADB
   fi
+  [[ -n $bin ]] || return 1
   HOME=$ADB_HOME timeout "${ADB_TIMEOUT:-30}" "$bin" "$@" 9>&-
 }
 
 # Connect our adb to Waydroid's Android and print its serial. $1 = seconds to keep trying.
 # Android's address rarely changes, so the last one is tried first (asking Waydroid takes ~0.4 s).
 wd_connect() {
-  local serial st try deadline=$((SECONDS + ${1:-20})) cache=$STATE_DIR/android.serial adb
+  local serial="" st try netd_stopping=0 deadline=$((SECONDS + ${1:-20})) cache=$STATE_DIR/android.serial adb
   adb=$(adb_bin) || return 1
-  serial=$(<"$cache" 2>/dev/null) || serial=""
+  [[ ! -r $cache ]] || serial=$(<"$cache")
+  [[ $serial =~ ^[0-9.]+:5555$ ]] || serial=$(android_ip):5555
   while :; do
     if [[ $serial =~ ^[0-9.]+:5555$ ]]; then
       for try in 1 2; do
         st=$(HOME=$ADB_HOME timeout 5 "$adb" -s "$serial" get-state 2>/dev/null 9>&- || true)
         if [[ $st == device ]]; then
-          [[ $(<"$cache" 2>/dev/null) == "$serial" ]] || { mkdir -p "$STATE_DIR" && echo "$serial" >"$cache"; }
+          [[ -r $cache && $(<"$cache") == "$serial" ]] || { mkdir -p "$STATE_DIR" && echo "$serial" >"$cache"; }
           echo "$serial"
           return 0
         fi
@@ -295,6 +297,15 @@ wd_connect() {
       done
     fi
     ((SECONDS < deadline)) || return 1
+    # If Android's core crashed during boot, Waydroid's read-only cgroups leave netd stuck in
+    # "stopping" with no network; fail fast so the caller can restart the container instead of
+    # burning the whole timeout on unreachable ARP probes.
+    if [[ $(timeout 5 waydroid prop get init.svc.netd 2>/dev/null || true) == stopping ]]; then
+      netd_stopping=$((netd_stopping + 1))
+      ((netd_stopping < 2)) || return 1
+    else
+      netd_stopping=0
+    fi
     sleep 0.3
     serial=$(android_ip):5555
   done
@@ -465,6 +476,8 @@ wd_start() {
     else
       setsid -f waydroid session start >"$log" 2>&1 </dev/null 9>&-
     fi
+  elif [[ $(wd_state) == FROZEN ]]; then
+    container_call Unfreeze || true
   fi
   local deadline=$((SECONDS + timeout))
   until android_booted; do

@@ -1,0 +1,71 @@
+name: Bug report
+description: Report an install, sign-in, display, or runtime problem with Kindle for Linux
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting an issue! Because Kindle for Linux interacts with your distro, GPU, desktop environment, and Android backend, pasting the output of `kindle-for-linux --diagnostics` below helps track down problems quickly even on hardware I don't have.
+
+        *(If you installed from a git clone, run `./kindle --diagnostics`. Your home directory path is replaced with `~` and no Amazon credentials or keys are included.)*
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe what went wrong and what you expected to happen.
+      placeholder: e.g. Setup finished, but clicking Kindle opens a black window on Fedora KDE.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Where did the problem occur?
+      options:
+        - Package install (apt / dnf / zypper / pacman)
+        - First-time setup (--setup / ./install.sh)
+        - Amazon sign-in
+        - Opening or resizing Kindle
+        - Reading / keyboard / mouse / clipboard
+        - Uninstall (--uninstall)
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: How did you install Kindle for Linux?
+      options:
+        - ".deb package (Ubuntu / Debian / Mint)"
+        - ".rpm package (Fedora / openSUSE)"
+        - "Arch package / PKGBUILD"
+        - "Git clone or release tarball (./install.sh)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Optional — helpful if the issue happens after a specific action.
+      placeholder: |
+        1. Run `kindle-for-linux`
+        2. Resize the window / press ...
+        3. Observe error
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics output
+      description: Run `kindle-for-linux --diagnostics` in a terminal and paste the full output below. (If setup already finished, `kindle-for-linux --verify` output is also helpful.)
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context or screenshots
+      description: Anything else worth knowing (hybrid GPU laptop, multi-monitor fractional scaling, custom kernel, VPN/firewall, etc.).

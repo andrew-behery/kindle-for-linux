@@ -62,11 +62,11 @@ elif [[ $preexisting == 1 ]]; then
   say "Removing Kindle from Waydroid"
   if start_android 180; then
     [[ $(container_state) != FROZEN ]] || container_call Unfreeze || true
-    sudo waydroid shell -- pm uninstall "$KINDLE_PKG" >/dev/null || true
+    timeout 30 sudo waydroid shell -- pm uninstall "$KINDLE_PKG" >/dev/null 2>&1 || true
     # Put back the Waydroid settings install.sh changed.
     for prop in multi_windows suspend; do
       prev=$(state_get "prev_$prop")
-      [[ -n $prev ]] && waydroid prop set "persist.waydroid.$prop" "$prev" || true
+      [[ -n $prev ]] && timeout 15 waydroid prop set "persist.waydroid.$prop" "$prev" >/dev/null 2>&1 || true
     done
   else
     warn "Android didn't start, so Kindle couldn't be removed from it."

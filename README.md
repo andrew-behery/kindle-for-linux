@@ -27,7 +27,7 @@ Install the package for your distro from the [Releases](https://github.com/andre
 
 **Arch Linux:**
 ```sh
-curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.6/kindle-for-linux-0.1.6-1-any.pkg.tar.zst -o /tmp/kindle-for-linux.pkg.tar.zst
+curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.7/kindle-for-linux-0.1.7-1-any.pkg.tar.zst -o /tmp/kindle-for-linux.pkg.tar.zst
 sudo pacman -U /tmp/kindle-for-linux.pkg.tar.zst
 kindle-for-linux --setup
 ```
@@ -35,20 +35,20 @@ kindle-for-linux --setup
 
 **Debian, Ubuntu, Linux Mint:**
 ```sh
-curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.6/kindle-for-linux_0.1.6_all.deb -o /tmp/kindle-for-linux.deb
+curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.7/kindle-for-linux_0.1.7_all.deb -o /tmp/kindle-for-linux.deb
 sudo apt install /tmp/kindle-for-linux.deb
 kindle-for-linux --setup
 ```
 
 **Fedora:**
 ```sh
-sudo dnf install https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.6/kindle-for-linux-0.1.6-1.noarch.rpm
+sudo dnf install https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.7/kindle-for-linux-0.1.7-1.noarch.rpm
 kindle-for-linux --setup
 ```
 
 **openSUSE:**
 ```sh
-curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.6/kindle-for-linux-0.1.6-1.noarch.rpm -o /tmp/kindle-for-linux.rpm
+curl -fL https://github.com/andrew-behery/kindle-for-linux/releases/download/v0.1.7/kindle-for-linux-0.1.7-1.noarch.rpm -o /tmp/kindle-for-linux.rpm
 sudo zypper install /tmp/kindle-for-linux.rpm
 kindle-for-linux --setup
 ```
@@ -133,7 +133,7 @@ Open **Kindle** from your app menu, or run `kindle` (`kindle-for-linux` when ins
   `kindle --density reset` restores it). For one launch only: `KINDLE_DENSITY=110 kindle`. Book
   text size is also in Kindle's own reading settings.
 - `kindle --stop` shuts Android down and frees its memory. `kindle --status` shows its state.
-- `kindle --setup`, `kindle --verify [--bench]`, `kindle --uninstall`, and `kindle --version` manage the install from anywhere.
+- `kindle --setup`, `kindle --verify [--bench]`, `kindle --diagnostics`, `kindle --uninstall`, and `kindle --version` manage and troubleshoot the install from anywhere.
 
 ## Requirements
 

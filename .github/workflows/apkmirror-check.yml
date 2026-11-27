@@ -1,0 +1,23 @@
+name: APKMirror Check
+
+on:
+  schedule:
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+jobs:
+  verify-kindle-download:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download and verify latest Kindle Play APK from APKMirror
+        run: |
+          cert=$(sed -n 's/^AMAZON_KINDLE_CERT=//p' install.sh)
+          test -n "$cert"
+          version=$(python3 getkindle.py /tmp/kindle.apk)
+          echo "Downloaded Kindle $version"
+          python3 apkcert.py /tmp/kindle.apk --kindle "$cert"
+          icon=$(python3 apkicon.py /tmp/kindle.apk /tmp/kindle-icon)
+          test -s "$icon"
+          echo "Verified certificate and extracted icon: $icon"

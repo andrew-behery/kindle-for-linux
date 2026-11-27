@@ -102,11 +102,6 @@ explain_kindle_apk() {
 EOF
 }
 
-mkdir -p "$STATE_DIR"
-LOG=$STATE_DIR/install.log
-exec > >(tee -a "$LOG") 2>&1
-printf '\n===== install.sh, %s =====\n' "$(date -Is)"
-
 # --- Preflight ---------------------------------------------------------------------------------
 
 [[ $EUID -ne 0 ]] || die "Run this as your normal user, not with sudo. It asks for your password when it needs it."
@@ -120,6 +115,15 @@ esac
 
 mode=$(display_mode)
 [[ $mode != none ]] || die "Run this from a terminal inside your desktop session, not over SSH or a text console."
+
+mkdir -p "$STATE_DIR"
+if ((!check_only)) && command -v flock >/dev/null; then
+  exec 9>"$STATE_DIR/install.lock"
+  flock -n 9 || die "Setup is already running in another window. Finish or close it first."
+fi
+LOG=$STATE_DIR/install.log
+exec > >(exec 9>&-; tee -a "$LOG") 2>&1
+printf '\n===== install.sh, %s =====\n' "$(date -Is)"
 
 # Which way Android runs (see lib.sh). Waydroid needs binder in the kernel and a GPU its Android
 # can draw with: it picks an AMD/Intel/ARM one by itself and skips NVIDIA or unaccelerated VM GPUs
@@ -237,7 +241,7 @@ root() {
       sudo -n true
       sleep 50
       kill -0 "$$" 2>/dev/null || exit
-    done 2>/dev/null &
+    done 2>/dev/null 9>&- &
     sudo_keepalive=$!
     trap 'kill "$sudo_keepalive" 2>/dev/null || true' EXIT
     root_ready=1
@@ -556,7 +560,10 @@ if [[ $BACKEND == emulator ]]; then
   # The emulator calls adb itself: give it ours, so it talks to our adb server, not yours.
   ln -sfn "$(adb_bin)" "$EMU_SDK/platform-tools/adb"
   mkdir -p "$ADB_HOME/.android"
-  [[ -f $ADB_HOME/.android/adbkey ]] || kfl_adb keygen "$ADB_HOME/.android/adbkey" >/dev/null 2>&1
+  if [[ ! -f $ADB_HOME/.android/adbkey ]]; then
+    kfl_adb keygen "$ADB_HOME/.android/adbkey" >/dev/null 2>&1 || die "Couldn't create an adb key."
+    kfl_adb kill-server >/dev/null 2>&1 || true
+  fi
 
   # The virtual device. 1.5-2 GB is ample once Google's background apps are off (Android then
   # uses ~1 GB with Kindle open). No cameras or sensors. Its own screen only appears for
@@ -616,29 +623,7 @@ fi
 
 # --- Android settings --------------------------------------------------------------------------
 
-say "Starting Android (the first start takes a minute or two)"
-start_android 300 || die "Android didn't start. Details: $STATE_DIR/"
-
-say "Tuning Android for reading"
 if [[ $BACKEND == waydroid ]]; then
-  changed=0
-  # One display for Android. Per-app windows (multi_windows) are where the crash in waydroid#2436
-  # lives, and Kindle's window comes from scrcpy anyway.
-  # (The values found are recorded, so uninstall.sh can put back a Waydroid that was here before.)
-  for prop in multi_windows suspend; do
-    [[ -n $(state_get "prev_$prop") ]] || state_set "prev_$prop" "$(waydroid prop get "persist.waydroid.$prop" 2>/dev/null || true)"
-  done
-  if [[ $(waydroid prop get persist.waydroid.multi_windows) != false ]]; then
-    waydroid prop set persist.waydroid.multi_windows false
-    changed=1
-  fi
-  # Waydroid freezes Android whenever its own display has nothing to show, and with Kindle in
-  # scrcpy's window that is always. So Android doesn't freeze itself; the launcher freezes it
-  # when Kindle's window closes.
-  if [[ $(waydroid prop get persist.waydroid.suspend) != false ]]; then
-    waydroid prop set persist.waydroid.suspend false
-    changed=1
-  fi
   # Clean up properties an earlier version wrote to waydroid.cfg (Waydroid's adbd has `adb root`
   # compiled out, so they aren't needed; sign-in uses the overlay service below instead).
   if [[ -n $(state_get debuggable_set_by_us) ]]; then
@@ -656,11 +641,11 @@ PYCFG
     stop_android
     root waydroid upgrade --offline >/dev/null 2>&1 || true
     state_set debuggable_set_by_us ""
-    changed=1
   fi
   # Sign-in inside Kindle's window needs the patched scrcpy server to run as Android's system user
   # (uid 1000) so it can create a secure virtual screen. Waydroid's adbd refuses `adb root`, so
   # place the pinned server in Waydroid's system overlay as an init service started only on demand.
+  # Installed before starting Android so a fresh setup or upgrade doesn't need an extra reboot.
   if [[ -f $SCRCPY_DIR/scrcpy-server-secure ]]; then
     overlay=/var/lib/waydroid/overlay/system
     cmp_overlay() {
@@ -680,8 +665,32 @@ PYCFG
       root install -Dm 755 "$here/scrcpy-server/kfl-scrcpy-server" "$overlay/bin/kfl-scrcpy-server"
       root install -Dm 644 "$here/scrcpy-server/kfl-scrcpy.rc" "$overlay/etc/init/kfl-scrcpy.rc"
       state_set waydroid_signin_service 1
-      changed=1
     fi
+  fi
+fi
+
+say "Starting Android (the first start takes a minute or two)"
+start_android 300 || die "Android didn't start. Details: $STATE_DIR/"
+
+say "Tuning Android for reading"
+if [[ $BACKEND == waydroid ]]; then
+  changed=0
+  # One display for Android. Per-app windows (multi_windows) are where the crash in waydroid#2436
+  # lives, and Kindle's window comes from scrcpy anyway.
+  # (The values found are recorded, so uninstall.sh can put back a Waydroid that was here before.)
+  for prop in multi_windows suspend; do
+    [[ -n $(state_get "prev_$prop") ]] || state_set "prev_$prop" "$(timeout 15 waydroid prop get "persist.waydroid.$prop" 2>/dev/null || true)"
+  done
+  if [[ $(timeout 15 waydroid prop get persist.waydroid.multi_windows 2>/dev/null || true) != false ]]; then
+    timeout 15 waydroid prop set persist.waydroid.multi_windows false || true
+    changed=1
+  fi
+  # Waydroid freezes Android whenever its own display has nothing to show, and with Kindle in
+  # scrcpy's window that is always. So Android doesn't freeze itself; the launcher freezes it
+  # when Kindle's window closes.
+  if [[ $(timeout 15 waydroid prop get persist.waydroid.suspend 2>/dev/null || true) != false ]]; then
+    timeout 15 waydroid prop set persist.waydroid.suspend false || true
+    changed=1
   fi
   if ((changed)); then
     note "Restarting Android so the changes take effect"
@@ -697,11 +706,13 @@ PYCFG
     if [[ ! -f $ADB_HOME/.android/adbkey ]]; then
       mkdir -p "$ADB_HOME/.android"
       kfl_adb keygen "$ADB_HOME/.android/adbkey" >/dev/null 2>&1 || die "Couldn't create an adb key."
+      kfl_adb kill-server >/dev/null 2>&1 || true
     fi
     # Android's files belong to its system user (uid 1000): writing them needs root unless that's us.
-    [[ -w $dir ]] || run=(root)
+    [[ -w $dir && (! -e $dir/adb_keys || -w $dir/adb_keys) ]] || run=(root)
     # shellcheck disable=SC2016
     "${run[@]}" bash -c '
+      mkdir -p "$1"
       f=$1/adb_keys key=$(<"$2")
       grep -qsF "${key%% *}" "$f" && exit 0
       if [[ -s $f && -n $(tail -c1 "$f") ]]; then echo >>"$f"; fi # adb writes keys without a newline
@@ -711,7 +722,15 @@ PYCFG
   }
   trust_adb_key
 fi
-serial=$(android_connect 60) || die "Couldn't connect to Android with adb. Details: $LOG"
+if ! serial=$(android_connect 25); then
+  # Android can boot without a working network after an internal crash (on Waydroid, init leaves
+  # netd stuck in "stopping" because cgroups are read-only). A fresh start recovers it.
+  note "Android didn't answer adb; restarting it once"
+  stop_android
+  start_android 180 || die "Android didn't restart. Details: $STATE_DIR/"
+  android_wake
+  serial=$(android_connect 60) || die "Couldn't connect to Android with adb. Details: $LOG"
+fi
 adb_shell() { kfl_adb -s "$serial" shell "$@"; }
 
 ensure_emulator_trimmed "$serial"
@@ -792,8 +811,11 @@ else
   fi
   say "Installing Kindle (Android prepares the app under ARM translation, which takes a minute)"
   # -r keeps an installed Kindle's data (your sign-in and books) when replacing it.
-  out=$(timeout 600 env HOME="$ADB_HOME" "$(adb_bin)" -s "$serial" install -r "$apk" 2>&1) || true
-  [[ $out == *Success* ]] || die "Kindle didn't install: ${out##*$'\n'}"
+  out=$(timeout 600 env HOME="$ADB_HOME" "$(adb_bin)" -s "$serial" install -r "$apk" 2>&1 9>&-) || true
+  if [[ $out != *Success* ]]; then
+    last=${out##*$'\n'}
+    die "Kindle didn't install${last:+: $last} (see $LOG)"
+  fi
   note "Installed."
   [[ -n $had_kindle ]] || fresh_kindle=1 # a new Kindle starts signed out
   rm -f "$APP_DIR"/kindle.png "$APP_DIR"/kindle.webp # a new Kindle may bring a new icon
@@ -912,7 +934,7 @@ if [[ -n ${fresh_kindle:-} ]]; then
   note "Kindle opens in a moment at Amazon's sign-in page. Once you're signed in, it reopens"
   note "with your library."
   note "(To sign in again later: the menu entry's \"Sign in to Amazon\" action, or $cmd_name --sign-in.)"
-  setsid -f "$launcher" --sign-in >/dev/null 2>&1 </dev/null
+  setsid -f "$launcher" --sign-in >/dev/null 2>&1 </dev/null 9>&-
 else
-  setsid -f "$launcher" >/dev/null 2>&1 </dev/null
+  setsid -f "$launcher" >/dev/null 2>&1 </dev/null 9>&-
 fi
