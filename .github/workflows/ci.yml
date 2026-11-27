@@ -88,7 +88,7 @@ jobs:
           path: dist/
       - name: Install and smoke-test .rpm on ${{ matrix.image }}
         run: |
-          dnf install -y ./dist/kindle-for-linux-*.rpm desktop-file-utils shadow-utils
+          dnf install -y ./dist/kindle-for-linux-*.rpm desktop-file-utils shadow-utils util-linux
           desktop-file-validate /usr/share/applications/kindle-for-linux.desktop
           test -f /usr/share/icons/hicolor/scalable/apps/kindle-for-linux.svg
           test -f /usr/share/licenses/kindle-for-linux/LICENSE
